@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""Scénarios de validation du firmware de test T1000-A dans l'émulateur GR5515.
+
+Chaque scénario part d'une Flash simulée (bootloader non modélisé, zone appli = notre image),
+démarre le firmware et vérifie un comportement de sécurité. Code de sortie 0 si tout passe.
+"""
+import struct, sys
+sys.path.insert(0, __file__.rsplit('/', 1)[0])
+from gr5515_sim import GR5515Sim, Stop, Reset
+
+ELF = sys.argv[1] if len(sys.argv) > 1 else 'firmware/hello/build/t1000a_hello.elf'
+GUARD, FLAG, NVDS = 0x010E3000, 0x010E4000, 0x010FC000
+ALLOWED_WRITES = [(GUARD, 0x1000), (FLAG, 0x1000), (NVDS, 0x1000)]
+MAGIC = b'T1GD'
+TICK_MS = 50
+results = []
+
+
+def check(name, cond, detail=''):
+    results.append((name, bool(cond), detail))
+    print(f'  [{"OK " if cond else "ÉCHEC"}] {name}{" — " + detail if detail and not cond else ""}')
+
+
+def timer_irq(sim):
+    """Interruption simulée du temporisateur de 50 ms (tick_cb du firmware)."""
+    up, pend = sim.var['s_uptime_ms'], sim.var['s_tick_pending']
+    sim.w32(up, sim.r32(up) + TICK_MS)
+    sim.uc.mem_write(pend, b'\x01')
+
+
+def writes_ok(sim):
+    bad = [e for e in sim.events if e[0] in ('flash_write', 'flash_erase')
+           and not any(a <= e[1] < a + n for a, n in ALLOWED_WRITES)]
+    return not bad, bad
+
+
+def new(preset=None):
+    s = GR5515Sim(ELF, flash_preset=preset)
+    s.trace('app_aon_wdt_init', 'app_aon_wdt_deinit', 'app_aon_wdt_refresh', 'safety_enter_dfu', 'console_poll')
+    return s
+
+
+def dfu_flag_set(s):
+    return s.flash_bytes(FLAG, 1) == b'\x01' and s.flash_bytes(FLAG + 1, 15) == b'\xff' * 15
+
+
+print('S1 — démarrage à froid, Flash vierge')
+s = new()
+r = s.boot()
+check('atteint la boucle principale', r == 'atteint pwr_mgmt_schedule', r)
+check('compteur de démarrages : en-tête + 1', s.flash_bytes(GUARD, 6) == MAGIC + b'\x00\xff')
+check('chien de garde initialisé', 'app_aon_wdt_init' in s.calls)
+check('aucun drapeau DFU', s.flash_bytes(FLAG, 1) == b'\xff')
+ok, bad = writes_ok(s); check('écritures Flash limitées aux zones prévues', ok, str(bad))
+
+print('S2 — secteur de garde contenant des données étrangères (ancien firmware)')
+s = new({GUARD: bytes(range(256)) * 4})
+r = s.boot()
+check('démarre normalement', r == 'atteint pwr_mgmt_schedule', r)
+check('garde réinitialisée : en-tête + 1', s.flash_bytes(GUARD, 6) == MAGIC + b'\x00\xff')
+check('pas de DFU', s.flash_bytes(FLAG, 1) == b'\xff')
+
+print('S3 — deux démarrages rapides déjà comptés → le 3e bascule en DFU')
+s = new({GUARD: MAGIC + b'\x00\x00'})
+try:
+    s.boot(); reset = False
+except Reset:
+    reset = True
+check('redémarrage demandé', reset)
+check('drapeau DFU = 0x01 à 0x010E4000', dfu_flag_set(s), s.flash_bytes(FLAG, 4).hex())
+check('garde remise à zéro', s.flash_bytes(GUARD, 5) == MAGIC + b'\xff')
+ok, bad = writes_ok(s); check('écritures Flash limitées', ok, str(bad))
+
+print('S4 — un démarrage rapide déjà compté → démarrage normal, compteur à 2')
+s = new({GUARD: MAGIC + b'\x00'})
+r = s.boot()
+check('démarre normalement', r == 'atteint pwr_mgmt_schedule', r)
+check('compteur à 2', s.flash_bytes(GUARD, 7) == MAGIC + b'\x00\x00\xff')
+
+print('S5 — 60 s de fonctionnement stable → compteur effacé')
+s = new()
+s.on_idle = timer_irq
+r = s.run_main_loop(idles=61000 // TICK_MS + 5)
+check('boucle principale tourne', 'passages en veille' in r, r)
+check('compteur effacé après 60 s', s.flash_bytes(GUARD, 5) == MAGIC + b'\xff')
+check('chien de garde rafraîchi régulièrement', s.calls.count('app_aon_wdt_refresh') > 1000,
+      str(s.calls.count('app_aon_wdt_refresh')))
+leds = [e[3] for e in s.events if e[0] == 'io' and e[1] == 3 and e[2] == 0x8]
+check('LED clignote (battement)', 0 in leds and 1 in leds, str(leds[:10]))
+
+print('S6 — bouton maintenu → DFU après 6 s, pas avant')
+s = new()
+s.on_idle = timer_irq
+s.button = 1
+reset_at = None
+try:
+    s.run_main_loop(idles=200)
+except Reset:
+    reset_at = s.r32(s.var['s_uptime_ms'])
+check('bascule en DFU', reset_at is not None)
+check('après 6 s environ', reset_at is not None and 5900 <= reset_at <= 6200, str(reset_at))
+check('drapeau DFU écrit', dfu_flag_set(s))
+i_deinit = s.calls.index('app_aon_wdt_deinit') if 'app_aon_wdt_deinit' in s.calls else None
+check('chien de garde coupé avant le passage en DFU', i_deinit is not None)
+check('LED allumée pendant l\'appui', any(e[0] == 'io' and e[2] == 0x8 and e[3] == 1 for e in s.events))
+
+print('S7 — bouton relâché avant 6 s → pas de DFU')
+s = new()
+s.on_idle = lambda sim: (timer_irq(sim), setattr(sim, 'button', 1 if sim.idle_count < 80 else 0))
+try:
+    r = s.run_main_loop(idles=200); reset = False
+except Reset:
+    reset = True
+check('pas de redémarrage', not reset)
+check('pas de drapeau DFU', s.flash_bytes(FLAG, 1) == b'\xff')
+
+print('S8 — commande « dfu » reçue sur la console BLE')
+s = new()
+s.on_idle = timer_irq
+s.run_main_loop(idles=3)
+buf, evt = 0x3003F000, 0x3003F100            # zone libre en haut de RAM (sous la pile)
+s.uc.mem_write(buf, b'dfu\r\n')
+s.uc.mem_write(evt, struct.pack('<BBxxIHxx', 1, 0, buf, 5))   # GUS_EVT_RX_DATA_RECEIVED
+s.call('gus_evt', evt)
+try:
+    s.resume(idles=5); reset = False
+except Reset:
+    reset = True
+check('bascule en DFU', reset)
+check('drapeau DFU écrit', dfu_flag_set(s))
+
+print('S9 — commande inconnue puis « reboot » : redémarrage sans DFU, compteur effacé')
+s = new({GUARD: MAGIC + b'\x00'})
+s.on_idle = timer_irq
+s.run_main_loop(idles=3)
+for cmd in (b'xyz\r\n', b'reboot\r\n'):
+    s.uc.mem_write(buf, cmd)
+    s.uc.mem_write(evt, struct.pack('<BBxxIHxx', 1, 0, buf, len(cmd)))
+    s.call('gus_evt', evt)
+    try:
+        s.resume(idles=3); reset = False
+    except Reset:
+        reset = True
+check('redémarrage', reset)
+check('pas de drapeau DFU', s.flash_bytes(FLAG, 1) == b'\xff')
+check('compteur effacé', s.flash_bytes(GUARD, 5) == MAGIC + b'\xff')
+
+failed = [r for r in results if not r[1]]
+print(f'\n{len(results) - len(failed)}/{len(results)} vérifications réussies')
+sys.exit(1 if failed else 0)
