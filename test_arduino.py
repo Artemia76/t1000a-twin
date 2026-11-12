@@ -103,6 +103,9 @@ check('setup() puis loop() appelés', 'setup' in s.calls and 'loop' in s.calls
       and s.calls.index('setup') < s.calls.index('loop'))
 check('pile BLE initialisée avant setup()', 'ble_stack_init' in s.calls
       and s.calls.index('ble_stack_init') < s.calls.index('setup'))
+dh = s.sym.get('Default_Handler')
+check('SVC_Handler et HardFault_Handler ≠ Default_Handler (correctifs ROM, fautes)',
+      all(s.sym.get(n) not in (None, dh) for n in ('SVC_Handler', 'HardFault_Handler')))
 check('constructeur de Serial exécuté (vtable)', s.r32(var(s, 'Serial')) != 0)
 check('compteur de démarrages : en-tête + 1', s.flash_bytes(GUARD, 6) == MAGIC + b'\x00\xff')
 check('chien de garde initialisé', 'app_aon_wdt_init' in s.calls)
