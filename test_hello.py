@@ -77,12 +77,12 @@ r = s.boot()
 check('démarre normalement', r == 'atteint pwr_mgmt_schedule', r)
 check('compteur à 2', s.flash_bytes(GUARD, 7) == MAGIC + b'\x00\x00\xff')
 
-print('S5 — 60 s de fonctionnement stable → compteur effacé')
+print('S5 — 60 s de fonctionnement SANS connexion BLE → compteur conservé')
 s = new()
 s.on_idle = timer_irq
 r = s.run_main_loop(idles=61000 // TICK_MS + 5)
 check('boucle principale tourne', 'passages en veille' in r, r)
-check('compteur effacé après 60 s', s.flash_bytes(GUARD, 5) == MAGIC + b'\xff')
+check('compteur conservé (pas de connexion)', s.flash_bytes(GUARD, 6) == MAGIC + b'\x00\xff')
 check('chien de garde rafraîchi régulièrement', s.calls.count('app_aon_wdt_refresh') > 1000,
       str(s.calls.count('app_aon_wdt_refresh')))
 leds = [e[3] for e in s.events if e[0] == 'io' and e[1] == 3 and e[2] == 0x8]
@@ -144,6 +144,62 @@ for cmd in (b'xyz\r\n', b'reboot\r\n'):
 check('redémarrage', reset)
 check('pas de drapeau DFU', s.flash_bytes(FLAG, 1) == b'\xff')
 check('compteur effacé', s.flash_bytes(GUARD, 5) == MAGIC + b'\xff')
+
+BLE_GAPC_EVT_CONNECTED = 0x0301
+
+
+def ble_connect(sim):
+    evt = 0x3003F200
+    sim.uc.mem_write(evt, struct.pack('<HHB', BLE_GAPC_EVT_CONNECTED, 0, 0) + bytes(0x28 - 5))
+    sim.call('ble_evt_handler', evt)
+
+
+print('S10 — connexion BLE → compteur remis à zéro, plus de redémarrage automatique')
+s = new({GUARD: MAGIC + b'\x00'})
+s.on_idle = timer_irq
+s.run_main_loop(idles=20)
+check('compteur à 2 avant connexion', s.flash_bytes(GUARD, 7) == MAGIC + b'\x00\x00\xff')
+ble_connect(s)
+check('compteur effacé à la connexion', s.flash_bytes(GUARD, 5) == MAGIC + b'\xff')
+try:
+    s.resume(idles=6 * 60 * 1000 // TICK_MS); reset = False
+except Reset:
+    reset = True
+check('pas de redémarrage après 6 min une fois connecté', not reset)
+
+print('S11 — aucune connexion BLE pendant 5 min → redémarrage qui conserve le compteur')
+s = new()
+s.on_idle = timer_irq
+reset_at = None
+try:
+    s.run_main_loop(idles=6 * 60 * 1000 // TICK_MS)
+except Reset:
+    reset_at = s.r32(s.var['s_uptime_ms'])
+check('redémarrage', reset_at is not None)
+check('vers 5 min', reset_at is not None and 299_000 <= reset_at <= 301_000, str(reset_at))
+check('compteur conservé (en-tête + 1)', s.flash_bytes(GUARD, 6) == MAGIC + b'\x00\xff')
+check('pas de drapeau DFU', s.flash_bytes(FLAG, 1) == b'\xff')
+check('chien de garde coupé avant le redémarrage', 'app_aon_wdt_deinit' in s.calls)
+
+print('S12 — BLE muet de bout en bout : démarrages successifs jusqu\'au DFU')
+flash = None
+outcome = []
+for boot in range(1, 5):
+    # On ne transmet d'un démarrage à l'autre que la garde et le drapeau DFU : le NVDS écrit par
+    # l'émulateur (en-tête issu de la ROM factice) n'a pas de sens au démarrage suivant.
+    s = new(None if flash is None else {GUARD: flash[GUARD - 0x01000000:][:0x1000],
+                                        FLAG: flash[FLAG - 0x01000000:][:0x1000]})
+    s.on_idle = timer_irq
+    try:
+        s.run_main_loop(idles=6 * 60 * 1000 // TICK_MS)
+        outcome.append('tourne')
+    except Reset:
+        outcome.append('DFU' if dfu_flag_set(s) else 'redémarrage')
+    flash = bytes(s.flash)
+    if outcome[-1] == 'DFU':
+        break
+check('séquence redémarrage, redémarrage, DFU', outcome == ['redémarrage', 'redémarrage', 'DFU'], str(outcome))
+check('DFU atteint en ≈ 10 min (2 × 5 min)', len(outcome) == 3)
 
 failed = [r for r in results if not r[1]]
 print(f'\n{len(results) - len(failed)}/{len(results)} vérifications réussies')
