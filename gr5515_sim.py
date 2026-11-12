@@ -134,6 +134,7 @@ class GR5515Sim:
         uc.hook_add(UC_HOOK_MEM_WRITE, self._on_periph_write, begin=PERIPH_BASE, end=PERIPH_BASE + PERIPH_SIZE - 1)
         uc.hook_add(UC_HOOK_MEM_READ, self._on_periph_read, begin=PERIPH_BASE, end=PERIPH_BASE + PERIPH_SIZE - 1)
         self.cyc = 0
+        self.cal_cyc, self._cal_prev = 0, 0          # temps du calendrier, en cycles de 64 MHz
         self.aon_reload, self.aon_elapsed = 0xFFFFFFFF, 0
 
     def _rom_boot_state(self):
@@ -259,8 +260,16 @@ class GR5515Sim:
     }
 
     def _on_periph_read(self, uc, access, addr, size, value, _):
-        if addr & ~3 == 0xA000C594:          # AON TIMER_VAL : compteur décroissant (horloge lente)
-            ticks = (self.total_insn - self.aon_elapsed) // 2000     # ≈ 64 MHz / 32 kHz
+        if addr & ~3 == 0xA000C594:          # AON TIMER_VAL, multiplexé par AON_PAD_CTL1[31:30]
+            sel = (struct.unpack('<I', uc.mem_read(0xA000C55C, 4))[0] >> 30) & 3
+            cal_en = struct.unpack('<I', uc.mem_read(0xA000C518, 4))[0] & 1
+            if sel == 0 and cal_en:          # calendrier (activé par notre code) : croissant à 32 768 Hz
+                self.cyc = (self.cyc + 1000) & 0xFFFFFFFF        # le temps avance à chaque lecture
+                self.cal_cyc += (self.cyc - self._cal_prev) & 0xFFFFFFFF
+                self._cal_prev = self.cyc
+                uc.mem_write(0xA000C594, struct.pack('<I', (self.cal_cyc * 32768 // 64_000_000) & 0xFFFFFFFF))
+                return
+            ticks = (self.total_insn - self.aon_elapsed) // 2000     # minuteur décroissant (≈ 64 MHz / 32 kHz)
             uc.mem_write(0xA000C594, struct.pack('<I', (self.aon_reload - ticks) & 0xFFFFFFFF))
             return
         f = self.READ_RULES.get(addr & ~3)

@@ -46,8 +46,8 @@ def var(sim, name):
 
 
 def millis(sim):
-    a = var(sim, 's_cyc_total')
-    return (sim.r32(a) | sim.r32(a + 4) << 32) // (F_CPU // 1000)
+    a = var(sim, 's_cal_total')                       # ticks du calendrier (32 768 Hz)
+    return (sim.r32(a) | sim.r32(a + 4) << 32) * 1000 // 32768
 
 
 def advance(ms):
