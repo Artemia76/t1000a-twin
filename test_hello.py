@@ -145,6 +145,21 @@ check('redémarrage', reset)
 check('pas de drapeau DFU', s.flash_bytes(FLAG, 1) == b'\xff')
 check('compteur effacé', s.flash_bytes(GUARD, 5) == MAGIC + b'\xff')
 
+print('S13 — deux commandes reçues d\'affilée avant traitement : aucune perdue')
+s = new()
+s.on_idle = timer_irq
+s.run_main_loop(idles=3)
+for cmd in (b'led on\r\n', b'reboot\r\n'):          # deux événements sans passage par la boucle
+    s.uc.mem_write(buf, cmd)
+    s.uc.mem_write(evt, struct.pack('<BBxxIHxx', 1, 0, buf, len(cmd)))
+    s.call('gus_evt', evt)
+try:
+    s.resume(idles=3); reset = False
+except Reset:
+    reset = True
+check('1re commande exécutée (LED allumée)', any(e[0] == 'io' and e[2] == 0x8 and e[3] == 1 for e in s.events))
+check('2e commande exécutée (redémarrage)', reset)
+
 BLE_GAPC_EVT_CONNECTED = 0x0301
 
 
