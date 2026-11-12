@@ -282,8 +282,11 @@ class GR5515Sim:
                 uc.mem_write(saddr, struct.pack('<I', cur))
 
     def _on_sys_read(self, uc, access, addr, size, value, _):
-        if addr == 0xE0001004:                       # DWT->CYCCNT avance
-            self.cyc = (self.cyc + 1000) & 0xFFFFFFFF
+        if addr == 0xE0001004:                       # DWT->CYCCNT : n'avance que si TRCENA et CYCCNTENA
+            demcr = struct.unpack('<I', uc.mem_read(0xE000EDFC, 4))[0]
+            ctrl = struct.unpack('<I', uc.mem_read(0xE0001000, 4))[0]
+            if (demcr >> 24) & 1 and ctrl & 1:
+                self.cyc = (self.cyc + 1000) & 0xFFFFFFFF
             uc.mem_write(addr, struct.pack('<I', self.cyc))
         elif addr == 0xE000E018:                     # SysTick->VAL descend
             self.cyc = (self.cyc + 1000) & 0xFFFFFFFF

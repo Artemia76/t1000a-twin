@@ -160,6 +160,23 @@ except Reset:
 check('1re commande exécutée (LED allumée)', any(e[0] == 'io' and e[2] == 0x8 and e[3] == 1 for e in s.events))
 check('2e commande exécutée (redémarrage)', reset)
 
+print('S14 — « lr init » sans radio : ni faute ni blocage, échec propre de begin()')
+s = new()
+s.on_idle = timer_irq
+s.run_main_loop(idles=3)
+cmd = b'lr init\r\n'
+s.uc.mem_write(buf, cmd)
+s.uc.mem_write(evt, struct.pack('<BBxxIHxx', 1, 0, buf, len(cmd)))
+s.call('gus_evt', evt)
+try:
+    r = s.resume(idles=40, max_insn=400_000_000); stop = None
+except (Stop, Reset) as e:
+    r, stop = None, e
+steps = [b for b in s.flash_bytes(0x010E2004, 32) if b != 0xFF]
+check('pas de faute ni de blocage', stop is None and r and 'passages en veille' in r, str(stop or r))
+check('fil d\'Ariane jusqu\'à begin() (10…14, 20)', steps[:7] == [10, 11, 12, 13, 14, 20, 91], str(steps))
+check('aucune faute enregistrée', s.flash_bytes(0x010E2100, 4) == b'\xff' * 4)
+
 BLE_GAPC_EVT_CONNECTED = 0x0301
 
 
