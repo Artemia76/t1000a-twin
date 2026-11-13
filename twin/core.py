@@ -696,10 +696,10 @@ class Twin:
         end = self.cycles + ms(ms_) if ms_ is not None else until_cycles
         budget = max_insn
         while True:
-            if self.state == 'dfu':
+            if self.state in ('dfu', 'halted'):
                 if end is not None:
                     self.cycles = max(self.cycles, end)
-                return 'dfu'
+                return self.state
             if until is not None and until(self):
                 return 'condition'
             if end is not None and self.cycles >= end:
