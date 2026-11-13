@@ -21,8 +21,9 @@ BUTTON, LED, BAT_EN, BUZZER_EN = 0x20, 0x23, 14, 15
 
 
 class T1000A:
-    def __init__(self, elf, name='t1000a', flash=None, seed=0, trace=False, passkey=123456, battery_mv=3900):
-        self.tw = tw = Twin(elf, flash=flash, seed=seed, name=name, trace=trace)
+    def __init__(self, elf, name='t1000a', flash=None, seed=0, trace=False, passkey=123456, battery_mv=3900,
+                 radio=True, turbo=True):
+        self.tw = tw = Twin(elf, flash=flash, seed=seed, name=name, trace=trace, turbo=turbo)
         self.name = name
         self.world = None
         self.gpio = Gpio(tw)
@@ -32,7 +33,7 @@ class T1000A:
         self.adc = Adc(tw)
         self.pwm = Pwm(tw)
         self.wdt = Watchdog(tw)
-        self.radio = LR1110(tw, self.gpio, self.spi)
+        self.radio = LR1110(tw, self.gpio, self.spi) if radio else None     # radio=False : LR1110 muet (panne)
         self.gnss = AG3335(tw, self.gpio, self.uart)
         self.ble = BleStack(tw)
         self.phone = Phone(self.ble, passkey=passkey)

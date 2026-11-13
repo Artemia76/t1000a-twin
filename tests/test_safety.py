@@ -88,3 +88,21 @@ def test_chien_de_garde_redemarre_un_firmware_bloque(any_elf):
     assert [r for _, r in n.tw.resets] == ['chien de garde AON'], n.tw.resets
     t = n.tw.resets[0][0] / 64e6 - 3.0
     assert 7.0 <= t <= 9.0, f'redémarrage après {t:.1f} s'
+
+
+# --- Mutations : un firmware ou un boîtier défaillant doit finir en DFU, jamais en brique ----------------
+def test_firmware_bloque_dans_loop_finit_en_dfu(any_elf):
+    """loop() remplacée par « b . » : chien de garde → redémarrages courts → 3e démarrage → DFU."""
+    n = T1000A(any_elf)
+    loop = n.tw.addr('loop')
+    n.tw.patch(loop, b'\xfe\xe7')                       # Thumb : b . (boucle infinie)
+    n.run(40_000)
+    assert n.tw.state == 'dfu', f'firmware bloqué non récupéré : {n.tw.resets}'
+    assert [r for _, r in n.tw.resets][:2] == ['chien de garde AON'] * 2
+
+
+def test_radio_muette_finit_en_dfu(meshcore_elf):
+    """LR1110 absent ou mort : MeshCore s'arrête dans setup() ; le boîtier doit rester récupérable."""
+    n = T1000A(meshcore_elf, radio=False)
+    n.run(60_000)
+    assert n.tw.state == 'dfu', f'boîtier sans radio non récupéré : {n.tw.resets}'

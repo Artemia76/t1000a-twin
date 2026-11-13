@@ -3,6 +3,8 @@
 Firmwares testés (chemins par défaut, ou options) :
   --meshcore  ELF du compagnon MeshCore BLE (third_party/meshcore/.pio/build/t1000a_companion_radio_ble/firmware.elf)
   --blink     ELF de l'exemple platform-gr551x (BleConsole)
+  --firmware  un seul ELF à valider (garde-fou avant flash) : les tests génériques s'appliquent à lui, les tests
+              MeshCore seulement s'il s'agit d'un firmware MeshCore.
 Un test dont le firmware est absent est sauté (pas d'échec).
 """
 import os, sys
@@ -27,9 +29,25 @@ MAGIC = b'T1GD'
 def pytest_addoption(parser):
     for k, v in DEFAULTS.items():
         parser.addoption(f'--{k}', default=v, help=f'ELF {k} (défaut : {v})')
+    parser.addoption('--firmware', default=None, help='valider uniquement cet ELF (garde-fou avant flash)')
+
+
+def is_meshcore(path):
+    from elftools.elf.elffile import ELFFile
+    st = ELFFile(open(path, 'rb')).get_section_by_name('.symtab')
+    return any('MyMesh' in s.name for s in st.iter_symbols())
 
 
 def elf_path(config, kind):
+    fw = config.getoption('firmware')
+    if fw:
+        if not os.path.exists(fw):
+            pytest.fail(f'firmware introuvable : {fw}')
+        if kind == 'meshcore' and not is_meshcore(fw):
+            pytest.skip('tests MeshCore : le firmware validé n\'est pas MeshCore')
+        if kind == 'blink':
+            pytest.skip('--firmware : seul ce firmware est validé')
+        return fw
     p = config.getoption(kind)
     if not os.path.exists(p):
         pytest.skip(f'firmware {kind} absent : {p}')
@@ -46,8 +64,16 @@ def blink_elf(pytestconfig):
     return elf_path(pytestconfig, 'blink')
 
 
-@pytest.fixture(scope='session', params=['meshcore', 'blink'])
+def pytest_generate_tests(metafunc):
+    if 'any_elf' in metafunc.fixturenames:
+        kinds = ['firmware'] if metafunc.config.getoption('firmware') else ['meshcore', 'blink']
+        metafunc.parametrize('any_elf', kinds, indirect=True, scope='session')
+
+
+@pytest.fixture(scope='session')
 def any_elf(request, pytestconfig):
+    if request.param == 'firmware':
+        return elf_path(pytestconfig, 'any')
     return elf_path(pytestconfig, request.param)
 
 

@@ -190,6 +190,13 @@ class Twin:
                     data = seg.data()
                     self.flash[lma - FLASH_BASE:lma - FLASH_BASE + len(data)] = data
 
+    def patch(self, addr, data):
+        """Modifie l'image en Flash (mutation du firmware pour les tests), y compris dans le CPU."""
+        o = addr - FLASH_BASE
+        self.flash[o:o + len(data)] = data
+        if self.uc is not None:
+            self._sync_flash(addr & ~0xFFF, ((addr + len(data) + 0xFFF) & ~0xFFF) - (addr & ~0xFFF))
+
     def flash_bytes(self, addr, n):
         return bytes(self.flash[addr - FLASH_BASE:addr - FLASH_BASE + n])
 
@@ -726,7 +733,17 @@ class Twin:
                     n = min(n, budget)
                     budget -= n
                 r = self._exec(self.pc(), n)
-                self.pc_samples[self.pc()] += 1
+                pc = self.pc()
+                self.pc_samples[pc] += 1
+                if r == 'count' and self.read(pc & ~1, 2) == b'\xfe\xe7':
+                    # « b . » : boucle sur elle-même, rien ne change jusqu'au prochain événement (ou à la fin)
+                    t = self._next_event()
+                    target = min(x for x in (t, end) if x is not None) if (t is not None or end is not None) else None
+                    if target is None:
+                        raise Stop(f'blocage définitif dans « b . » à {self.where(pc)} sans aucun événement')
+                    if target > self.cycles:
+                        self.spin_skipped += target - self.cycles
+                        self.cycles = target
                 if r == 'break':
                     return 'arrêt: ' + self.stop_reason
                 if r == 'sleep':
