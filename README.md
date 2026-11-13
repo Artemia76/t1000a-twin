@@ -6,6 +6,7 @@ exécute **le firmware réel (l'ELF compilé)** sur un modèle du GR5515 et de s
 passer les tests avant tout flash, et `t1000_ble.py flash` refuse un firmware qui échoue.
 
 ```
+git submodule update --init platform-gr551x         # plateforme (exemple blink, outils BLE)
 pip install -r tools/sim/requirements.txt            # unicorn, pyelftools, pytest
 python -m pytest tools/sim/tests -q                  # suite complète (≈ 6 min)
 python -m pytest tools/sim/tests -q --firmware X.elf # un seul firmware (ce que fait le garde-fou)
