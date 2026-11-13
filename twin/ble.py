@@ -29,7 +29,8 @@ class BleStack:
         self.tw = tw
         L = tw.L
         self.E = L.enum
-        self.mac = mac or bytes([tw.rng.randrange(256) for _ in range(2)]) + bytes([0x38, 0x17, 0x28, 0xFD])
+        r = __import__('random').Random(f'{tw.seed}-{tw.name}-mac')
+        self.mac = mac or bytes([r.randrange(256) for _ in range(2)]) + bytes([0x38, 0x17, 0x28, 0xFD])
         self.bonds = {}                     # adresse du téléphone -> {'cccd': {poignée: valeur}}
         self.next_handle = 0x0010
         self.phones = []

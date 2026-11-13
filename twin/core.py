@@ -44,8 +44,11 @@ SLICE = 10_000                                  # instructions par tranche (≈ 
 COST_CALL = 60                                  # cycles comptés pour un pilote remplacé par un modèle
 COST_CLOCK = 16                                 # cycles comptés par lecture d'horloge
 COST_IRQ = 120                                  # entrée + sortie d'interruption
+QUIET_LOOPS = 8                                 # tours de boucle « à vide » avant d'accélérer
+SPIN_SKIP = 64_000                              # saut maximal par tour accéléré (1 ms)
 
-PASS = object()                                 # un crochet qui renvoie PASS laisse s'exécuter la fonction réelle
+PASS = object()
+_U32 = struct.Struct('<I')                                 # un crochet qui renvoie PASS laisse s'exécuter la fonction réelle
 
 
 class Stop(Exception):
@@ -69,7 +72,7 @@ def ms(n):
 
 
 class Twin:
-    def __init__(self, elf_path, flash=None, seed=0, name='t1000a', trace=False):
+    def __init__(self, elf_path, flash=None, seed=0, name='t1000a', trace=False, turbo=True):
         self.name = name
         self.elf_path = elf_path
         self.trace_enabled = trace
@@ -130,6 +133,13 @@ class Twin:
         self._cal = None                        # (cycles au démarrage du calendrier)
         self.aon_reload, self.aon_t0 = 0xFFFFFFFF, 0
         self.uc, self._running, self._hooked, self._skip_bp = None, False, set(), None
+        self.asleep, self.sleeps, self.slept = False, 0, 0
+        # Accélération des boucles d'attente actives : voir _pwr_schedule
+        self.turbo = turbo
+        self._model_calls = self._calls_at_sched = 0
+        self._quiet = 0
+        self._yield = False
+        self.spin_skipped = 0
         from collections import Counter
         self.pc_samples = Counter()
 
@@ -320,8 +330,10 @@ class Twin:
         uc.mem_map_ptr(RAM_A, RAM_SIZE, UC_PROT_ALL, ctypes.addressof(self._ram))
         uc.mem_map_ptr(RAM_B, RAM_SIZE, UC_PROT_ALL, ctypes.addressof(self._ram))
         uc.mem_map(FLASH_BASE, FLASH_SIZE, UC_PROT_ALL)
-        uc.mem_map(PERIPH_BASE, PERIPH_SIZE, UC_PROT_ALL)
-        uc.mem_map(SYS_BASE, SYS_SIZE, UC_PROT_ALL)
+        self._periph = ctypes.create_string_buffer(PERIPH_SIZE)
+        self._sys = ctypes.create_string_buffer(SYS_SIZE)
+        uc.mem_map_ptr(PERIPH_BASE, PERIPH_SIZE, UC_PROT_ALL, ctypes.addressof(self._periph))
+        uc.mem_map_ptr(SYS_BASE, SYS_SIZE, UC_PROT_ALL, ctypes.addressof(self._sys))
         uc.mem_map(TRAMP & ~0xFFF, 0x1000, UC_PROT_ALL)
         uc.mem_write(TRAMP, b'\x00\xbf' * 8)                       # nop
         self._sync_flash()
@@ -332,13 +344,18 @@ class Twin:
         for a in set(self.intercept) | set(self.breakpoints) | self.traced:
             uc.hook_add(UC_HOOK_CODE, self._on_addr, begin=a, end=a)
         self._hooked = set(self.intercept) | set(self.breakpoints) | self.traced
-        uc.hook_add(UC_HOOK_MEM_READ, self._on_sys_read, begin=SYS_BASE, end=SYS_BASE + SYS_SIZE - 1)
-        uc.hook_add(UC_HOOK_MEM_WRITE, self._on_sys_write, begin=SYS_BASE, end=SYS_BASE + SYS_SIZE - 1)
+        # Crochets mémoire limités aux registres modélisés (le reste est de la mémoire simple)
+        for a in (0xE0001004, 0xE000E010, 0xE000E018):
+            uc.hook_add(UC_HOOK_MEM_READ, self._on_sys_read, begin=a, end=a + 3)
+        for a in (AIRCR, 0xE0001004):
+            uc.hook_add(UC_HOOK_MEM_WRITE, self._on_sys_write, begin=a, end=a + 3)
         uc.hook_add(UC_HOOK_MEM_WRITE, self._on_flash_write_direct, begin=FLASH_BASE, end=FLASH_BASE + FLASH_SIZE - 1)
         uc.hook_add(UC_HOOK_INTR, self._on_intr)
         uc.hook_add(UC_HOOK_MEM_UNMAPPED, self._on_unmapped)
-        uc.hook_add(UC_HOOK_MEM_WRITE, self._on_periph_write, begin=PERIPH_BASE, end=PERIPH_BASE + PERIPH_SIZE - 1)
-        uc.hook_add(UC_HOOK_MEM_READ, self._on_periph_read, begin=PERIPH_BASE, end=PERIPH_BASE + PERIPH_SIZE - 1)
+        for a in [self.TIMER_LOAD, self.CAL_CTL] + [w for w, _ in self.MIRRORS]:
+            uc.hook_add(UC_HOOK_MEM_WRITE, self._on_periph_write, begin=a, end=a + 3)
+        for a in [self.TIMER_VAL] + list(self.READ_RULES):
+            uc.hook_add(UC_HOOK_MEM_READ, self._on_periph_read, begin=a, end=a + 3)
 
         sp, reset = struct.unpack('<II', self.flash_bytes(APP_BASE, 8))
         uc.reg_write(UC_ARM_REG_SP, sp)
@@ -367,11 +384,29 @@ class Twin:
         w(0xA000DC10, 1)                      # XQSPI : drapeau XIP actif
 
     # ------------------------------------------------------------------ accès
+    def _buf(self, a):
+        if RAM_A <= a < RAM_A + RAM_SIZE:
+            return self._ram, a - RAM_A
+        if RAM_B <= a < RAM_B + RAM_SIZE:
+            return self._ram, a - RAM_B
+        if PERIPH_BASE <= a < PERIPH_BASE + PERIPH_SIZE:
+            return self._periph, a - PERIPH_BASE
+        if SYS_BASE <= a < SYS_BASE + SYS_SIZE:
+            return self._sys, a - SYS_BASE
+        return None, 0
+
     def r32(self, a):
+        b, o = self._buf(a)
+        if b is not None:
+            return _U32.unpack_from(b, o)[0]
         return struct.unpack('<I', self.uc.mem_read(a, 4))[0]
 
     def w32(self, a, v):
-        self.uc.mem_write(a, struct.pack('<I', v & 0xFFFFFFFF))
+        b, o = self._buf(a)
+        if b is not None:
+            _U32.pack_into(b, o, v & 0xFFFFFFFF)
+        else:
+            self.uc.mem_write(a, struct.pack('<I', v & 0xFFFFFFFF))
 
     def read(self, a, n):
         return bytes(self.uc.mem_read(a, n))
@@ -445,6 +480,8 @@ class Twin:
         h = self.intercept.get(addr)
         if h:
             fn, n, name = h
+            if fn != self._pwr_schedule:
+                self._model_calls += 1
             self.cycles_add(COST_CALL)
             ret = fn(*[self.arg(i) for i in range(n)])
             if ret is not PASS:
@@ -454,6 +491,7 @@ class Twin:
         name = self.rom.get(addr, f'rom_{addr:#x}')
         self.rom_calls[name] = self.rom_calls.get(name, 0) + 1
         h = self.rom_handlers.get(name)
+        self._model_calls += 1
         self.cycles_add(COST_CALL)
         if h:
             fn, n = h
@@ -487,15 +525,16 @@ class Twin:
         a = addr & ~3
         if a == self.TIMER_VAL:               # AON TIMER_VAL, multiplexé par AON_PAD_CTL1[31:30]
             self.cycles_add(COST_CLOCK)
-            sel = (self.r32(self.PAD_CTL1) >> 30) & 3
+            pb = self._periph
+            sel = (_U32.unpack_from(pb, self.PAD_CTL1 - PERIPH_BASE)[0] >> 30) & 3
             now = self.now()
-            if sel == 0 and self.r32(self.CAL_CTL) & 1:      # calendrier : croissant à 32 768 Hz
+            if sel == 0 and pb[self.CAL_CTL - PERIPH_BASE][0] & 1:   # calendrier : croissant à 32 768 Hz
                 if self._cal is None:
                     self._cal = now
                 v = (now - self._cal) * 32768 // F_CPU
             else:                                             # minuteur de veille décroissant
                 v = self.aon_reload - (now - self.aon_t0) * 32768 // F_CPU
-            self.w32(a, v)
+            _U32.pack_into(pb, a - PERIPH_BASE, v & 0xFFFFFFFF)
             return
         f = self.READ_RULES.get(a)
         if f:
@@ -566,8 +605,24 @@ class Twin:
     def _pwr_schedule(self):
         """pwr_mgmt_schedule : en mode veille, le cœur dort jusqu'au prochain événement."""
         if self.idle_mode_value is not None and self.pwr_mode == self.idle_mode_value and not self._in_irq:
-            self._return(None)
-            raise _Sleep()
+            raise _Sleep()                      # le CPU reste dans pwr_mgmt_schedule jusqu'à une interruption
+        # Mode actif : la boucle principale tourne à vide. Après QUIET_LOOPS tours sans aucun appel aux
+        # modèles (ni E/S, ni radio, ni Flash, ni BLE), le temps saute au prochain événement (au plus
+        # SPIN_SKIP) : les échéances et interruptions restent exactes, seul le nombre de tours change.
+        if self._model_calls == self._calls_at_sched:
+            self._quiet += 1
+        else:
+            self._quiet = 0
+            self._calls_at_sched = self._model_calls
+        if self.turbo and self._quiet >= QUIET_LOOPS and not self._in_irq:
+            now = self.now()
+            t = self._next_event()
+            target = now + SPIN_SKIP if t is None else min(t, now + SPIN_SKIP)
+            if target > now:
+                self._slice_extra += target - now
+                self.spin_skipped += target - now
+                self._yield = True
+                self.uc.emu_stop()
         return None
 
     # ================================================================== exécution
@@ -575,11 +630,14 @@ class Twin:
         """Exécute au plus `count` instructions depuis `start`. Renvoie 'count', 'until', 'sleep' ou lève."""
         self._slice_base, self._slice_extra = self.cycles, 0
         self._running = True
+        self._yield = False
         res = 'count'
         try:
             self.uc.emu_start(start | 1, until or 0xFFFFFFFF, count=count)
             if until and self.pc() == until:
                 res = 'until'
+            elif self._yield:
+                res = 'yield'
         except _Sleep:
             res = 'sleep'
         except _Break as e:
@@ -619,6 +677,7 @@ class Twin:
         heapq.heapify(self._heap)
         self.pwr_mode = 0
         self._cal = None
+        self.asleep = False
         self._build_cpu()
         for f in self.reset_listeners:
             f()
@@ -644,6 +703,10 @@ class Twin:
             if end is not None and self.cycles >= end:
                 return 'temps'
             try:
+                if self.asleep:
+                    if not self._sleep_until(end):
+                        return 'temps'
+                    continue
                 self._dispatch_due()
                 self._inject_pending()
                 n = SLICE
@@ -665,23 +728,39 @@ class Twin:
                 if r == 'break':
                     return 'arrêt: ' + self.stop_reason
                 if r == 'sleep':
-                    self._sleep(end)
+                    self.asleep = True
+                    self.sleeps += 1
             except Reset as e:
                 if reset == 'raise':
                     raise
                 self.reset(str(e))
 
-    def _sleep(self, end):
-        """Le cœur dort : le temps saute au prochain événement (ou à la fin demandée)."""
-        if self._pending:
-            return
-        t = self._next_event()
-        target = min(x for x in (t, end) if x is not None) if (t is not None or end is not None) else None
-        if target is None:
-            raise Stop('veille sans aucun événement programmé : le firmware ne se réveillerait jamais')
-        if target > self.cycles:
-            self.log('sleep', until_ms=target * 1000 // F_CPU) if self.trace_enabled else None
-            self.cycles = target
+    def _sleep_until(self, end):
+        """Le cœur dort dans pwr_mgmt_schedule : le temps saute d'événement en événement jusqu'à ce qu'une
+        interruption soit à servir (réveil) ou jusqu'à `end`. Renvoie True au réveil."""
+        while True:
+            if self._pending:
+                self._wake()
+                return True
+            t = self._next_event()
+            if t is None:
+                if end is None:
+                    raise Stop('veille sans aucun événement programmé : le firmware ne se réveillerait jamais')
+                self.slept += end - self.cycles
+                self.cycles = end
+                return False
+            if end is not None and t > end:
+                self.slept += end - self.cycles
+                self.cycles = end
+                return False
+            if t > self.cycles:
+                self.slept += t - self.cycles
+                self.cycles = t
+            self._dispatch_due()
+
+    def _wake(self):
+        self.asleep = False
+        self._return(None)                      # sortie de pwr_mgmt_schedule
 
     def call(self, name, *args, max_insn=5_000_000):
         """Appelle une fonction du firmware (synchrone, hors interruptions) et renvoie r0."""
