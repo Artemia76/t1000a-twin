@@ -35,6 +35,7 @@ FLASH_BASE, FLASH_SIZE = 0x01000000, 0x00100000
 APP_BASE = 0x0101B000                           # application (après le bootloader Seeed)
 PERIPH_BASE, PERIPH_SIZE = 0xA0000000, 0x00100000
 SYS_BASE, SYS_SIZE = 0xE0000000, 0x00100000
+EM_BASE, EM_SIZE = 0xB0000000, 0x00020000       # mémoire d'échange BLE (tampon NVDS g_nvds_buf, pile BLE)
 TRAMP = 0x0FFFFFF0                              # adresse de retour fictive (call / rappels injectés)
 SECTOR = 0x1000
 AIRCR = 0xE000ED0C
@@ -334,6 +335,7 @@ class Twin:
         self._sys = ctypes.create_string_buffer(SYS_SIZE)
         uc.mem_map_ptr(PERIPH_BASE, PERIPH_SIZE, UC_PROT_ALL, ctypes.addressof(self._periph))
         uc.mem_map_ptr(SYS_BASE, SYS_SIZE, UC_PROT_ALL, ctypes.addressof(self._sys))
+        uc.mem_map(EM_BASE, EM_SIZE, UC_PROT_ALL)
         uc.mem_map(TRAMP & ~0xFFF, 0x1000, UC_PROT_ALL)
         uc.mem_write(TRAMP, b'\x00\xbf' * 8)                       # nop
         self._sync_flash()

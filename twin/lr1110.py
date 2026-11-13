@@ -59,6 +59,7 @@ class LR1110:
         self.tx_packets = []
         self.rx_packets = []
         self.trace_cmds = False
+        self.noise_floor = -110.0
         self._power_on_reset()
         spi.attach(nss, self)
         gpio.watch(nreset, self._on_nreset)
@@ -315,8 +316,10 @@ class LR1110:
 
     def rssi_now(self):
         if self.ether:
-            return self.ether.rssi_at(self)
-        return -110.0
+            fr = self.ether.on_air(self)
+            if fr:
+                return self.ether.rssi_at(self)
+        return self.noise_floor + self.rng.uniform(-3.0, 3.0)      # bruit propre à chaque radio
 
     def _abort_radio(self):
         self.tw.cancel(self.op_ev)

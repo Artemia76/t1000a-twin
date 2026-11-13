@@ -18,6 +18,14 @@ CACHE_VERSION = 2
 PREFIXES = ('app_', 'ble_', 'gap', 'gatt', 'sec_', 'hal_', 'sdk_', 'pwr_', 'nvds', 'aon_', 'calendar',
             'uart_', 'spi_', 'adc_', 'pwm_', 'wdt_', 'gr551x', 'exflash', 'xqspi')
 MAX_DEPTH = 6
+# Valeurs du SDK GR551x utilisées quand un pilote n'est pas lié dans le firmware (énumération absente du DWARF)
+SDK_DEFAULTS = {
+    'APP_IO_TYPE_GPIOA': 0, 'APP_IO_TYPE_GPIOB': 1, 'APP_IO_TYPE_AON': 3, 'APP_IO_TYPE_MSIO': 4,
+    'APP_IO_TYPE_NORMAL': 5, 'APP_IO_MODE_INPUT': 1, 'APP_IO_MODE_OUTPUT': 2, 'APP_IO_MODE_MUX': 3,
+    'APP_IO_MODE_IT_RISING': 4, 'APP_IO_MODE_IT_FALLING': 5, 'APP_IO_MODE_IT_HIGH': 6, 'APP_IO_MODE_IT_LOW': 7,
+    'APP_IO_PULLUP': 1, 'APP_IO_PULLDOWN': 2, 'APP_UART_EVT_TX_CPLT': 1, 'APP_UART_EVT_RX_DATA': 2,
+    'ATIMER_ONE_SHOT': 0, 'ATIMER_REPEAT': 1, 'PMR_MGMT_ACTIVE_MODE': 0, 'PMR_MGMT_IDLE_MODE': 1,
+}
 
 
 class Layouts:
@@ -57,10 +65,11 @@ class Layouts:
         return self.field(typ, path)[0]
 
     def enum(self, name):
-        try:
+        if name in self.enums:
             return self.enums[name]
-        except KeyError:
-            raise KeyError(f'énumérateur {name} absent du DWARF du firmware') from None
+        if name in SDK_DEFAULTS:            # pilote non lié dans ce firmware : valeur du SDK
+            return SDK_DEFAULTS[name]
+        raise KeyError(f'énumérateur {name} absent du DWARF du firmware')
 
     def has(self, typ, path=None):
         return typ in self.types and (path is None or path in self.types[typ]['fields'])
