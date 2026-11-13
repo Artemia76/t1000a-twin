@@ -1,18 +1,101 @@
-# Émulateur GR5515 (validation avant flash)
+# Jumeau numérique du T1000-A (validation avant flash)
 
-Valide nos firmwares T1000-A sans risquer le boîtier. Basé sur Unicorn (Cortex-M4) + pyelftools.
-
-| Fichier | Rôle |
-|---|---|
-| `rom_check.py` | Vérifie que le firmware Seeed (qui fonctionne sur le boîtier) appelle la ROM aux adresses de la table de symboles de notre SDK → même ROM. Résultat : 73/78 fonctions, 96 % des appels. |
-| `gr5515_sim.py` | Émulateur : RAM (double vue 0x30000000/0x00800000), Flash NOR simulée, état laissé par la ROM, quelques registres matériels modélisés (XIP, RNG, compteur AON), appels ROM remplacés par des bouchons. |
-| `run_boot.py` | Démarre une image jusqu'à la boucle principale, avec trace en cas d'échec. |
-| `test_hello.py` | 12 scénarios / 40 vérifications du firmware de test : compteur de démarrages, DFU par bouton, par console, et automatique si le BLE reste muet (≈ 10 min), chien de garde, zones Flash écrites. |
+Le T1000-A n'a ni USB ni SWD accessibles. Chaque essai sur le boîtier passe donc par un DFU BLE, et une
+erreur au démarrage ne se rattrape que par la récupération « bouton + câble ». Le jumeau numérique
+exécute **le firmware réel (l'ELF compilé)** sur un modèle du GR5515 et de ses composants. On y fait
+passer les tests avant tout flash, et `t1000_ble.py flash` refuse un firmware qui échoue.
 
 ```
-.claude-work/.venv/bin/python -I tools/sim/test_hello.py firmware/hello/build/t1000a_hello.elf
+pip install -r tools/sim/requirements.txt            # unicorn, pyelftools, pytest
+python -m pytest tools/sim/tests -q                  # suite complète (≈ 6 min)
+python -m pytest tools/sim/tests -q --firmware X.elf # un seul firmware (ce que fait le garde-fou)
+python -m pytest tools/sim/tests -q --endurance-h 24 # endurance de 24 h virtuelles (≈ 5 min de plus)
+python tools/sim/run_twin.py firmware.elf -n 2       # jumeaux en temps réel, joignables en TCP
+meshcore-cli -t 127.0.0.1 -p 5000 infos              # le vrai client MeshCore sur le jumeau
+nc 127.0.0.1 5100                                    # console BLE de secours du nœud 0
 ```
 
-**Limites** : la ROM de la puce n'est pas disponible. La pile BLE, la gestion d'énergie et les pilotes ROM ne sont
-pas exécutés (bouchons). Le comportement électrique et les durées réelles ne sont pas modélisés.
-L'émulateur valide notre code et l'enchaînement du démarrage du SDK, pas le matériel.
+## Ce qui est modélisé
+
+| Composant | Modèle (`twin/`) | Fidélité |
+|---|---|---|
+| CPU Cortex-M4, RAM, Flash XIP | `core.py` (Unicorn) | Code machine réel. Flash NOR (écriture = ET, effacement par 4 Ko). Mémoire d'échange BLE |
+| Temps | `core.py` | Horloge unique à 64 MHz pour DWT, SysTick, minuteur AON et calendrier. Veille qui saute au prochain événement |
+| Interruptions | `core.py` | Rappels injectés entre deux instructions quelconques, si PRIMASK le permet, sur une pile d'interruption. `seed` fait varier les points d'injection |
+| GPIO / AON / MSIO | `periph.py` `Gpio` | Niveaux, tirages, fronts et niveaux d'IRQ, composants qui imposent des niveaux |
+| app_timer, UART, SPI, ADC, PWM | `periph.py` | Au niveau des pilotes `app_*` du SDK. UART au débit réel, morceaux livrés en interruption |
+| Chien de garde AON | `periph.py` `Watchdog` | Redémarre vraiment le MCU s'il n'est pas rafraîchi |
+| LR1110 | `lr1110.py` | Protocole SPI de la fiche technique : Stat1/Stat2/IRQ, réponse lue dans la transaction suivante, BUSY, réveil par NSS. États radio, tampons, temps d'antenne exact, DIO inversée vers AON1, RNG, bruit propre à chaque radio. Toute commande inconnue est relevée |
+| AG3335 (GNSS) | `ag3335.py` | NMEA RMC/GGA/GSA chaque seconde, seulement si GPS_EN et RESET sont hauts. Sans fix, avec fix ou trajet. Acquitte les `$PAIR` |
+| Pile BLE (ROM) | `ble.py` `BleStack` | API `ble_gap/gatts/sec` : base GATT construite depuis les tables du firmware, permissions (ATT 0x05 sans appairage), appairage par code, liaisons persistantes à travers les redémarrages, files de notifications limitées |
+| Téléphone | `ble.py` `Phone`, `companion.py` | Central qui se connecte, s'appaire, écrit et s'abonne. Client du protocole compagnon MeshCore |
+| Éther LoRa | `world.py` | Plusieurs jumeaux avancent en pas d'1 ms. RSSI/SNR par lien, pertes, collisions sans effet de capture, injection de paquets |
+| Carte T1000-A | `board.py` | Bouton AON0, LED AON3, batterie MSIO4 via pont ÷2 (actif si GPIO14=1), buzzer PWM0 |
+
+Les structures et énumérations du SDK (`ble_evt_t`, `app_io_evt_t`…) sont lues dans le **DWARF de l'ELF**
+(`layouts.py`, avec un cache dans `~/.cache/t1000-twin`). Les modèles suivent donc le SDK réellement compilé,
+sans aucun décalage codé en dur.
+
+## Tests (`tests/`)
+
+* `test_safety.py` couvre chaque firmware destiné au boîtier (MeshCore, blink) : garde de démarrage, DFU au
+  3ᵉ démarrage court, bouton maintenu 6 s, garde effacée après 2 min ou à la connexion, chien de garde de 8 s,
+  écritures Flash bornées. Deux mutations sont aussi testées : un firmware bloqué dans `loop()` et un LR1110
+  muet doivent finir **en DFU d'eux-mêmes**, jamais en brique.
+* `test_console.py` vérifie la console BLE de secours : `info`, `dfu`, `reboot`, deux lignes reçues d'affilée.
+* `test_meshcore.py` couvre le compagnon :
+  * radio (aucune commande inconnue, BUSY respecté, réception continue) ;
+  * sécurité BLE et `SELF_INFO` ;
+  * batterie et GNSS ;
+  * validité des adverts émis ;
+  * veille ;
+  * endurance ;
+  * réseau à deux nœuds (contacts, message + ACK), persistance après redémarrage, collision.
+
+## Garde-fou avant flash
+
+`tools/t1000_ble.py flash X_dfu.bin` cherche l'ELF voisin (`X.elf`) et lance la suite avec `--firmware X.elf`.
+Le flash est refusé si un test échoue, ou si le jumeau ou l'ELF sont introuvables. `--skip-twin` force le
+flash ; avec PlatformIO, c'est `custom_upload_skip_twin = yes`. Si le Python courant n'a pas unicorn,
+pyelftools et pytest, `T1000_TWIN_PYTHON` désigne celui qui les a, et `T1000_TWIN_DIR` indique le dossier du
+jumeau hors du dépôt.
+
+## Constats faits avec le jumeau
+
+* Après l'ajout d'un contact, MeshCore garde `hasPendingWork()` vrai pendant 5 s (écriture différée des
+  contacts). Le MCU tourne alors en continu, sans veille : c'est un coût d'énergie réel sur le boîtier.
+* GPIO14 (pont de mesure batterie, peut-être aussi l'alimentation RF) reste à 1 en permanence. Le test
+  correspondant est marqué `xfail` strict : il passera en échec quand ce sera corrigé, pour qu'on retire la
+  marque.
+* `g_nvds_buf` pointe dans la mémoire d'échange BLE (0xB0000000). Le modèle de mémoire doit l'inclure, sinon
+  `nvds_put` faute au 2ᵉ démarrage.
+
+## Limites : un succès est nécessaire, pas suffisant
+
+* **La ROM n'est pas exécutée.** La pile BLE, la gestion d'énergie et les pilotes HAL en ROM sont remplacés
+  par des modèles. Un bogue de la ROM, ou une mauvaise configuration qu'elle seule détecterait (horloge LF,
+  alimentation, comme pour hello-0.1), n'est **pas** vu. Les réglages de démarrage restent à comparer au
+  firmware Seeed.
+* Aucun comportement électrique ni radiofréquence, pas de consommation. 1 instruction ≈ 1 cycle.
+* Le LR1110 n'implémente que la partie LoRa utilisée par RadioLib. GNSS et Wi-Fi internes ne sont pas
+  modélisés. Les commandes inconnues sont relevées (`unknown_cmds`).
+* **Accélérations** (désactivables par `T1000A(..., turbo=False)`) :
+  * une boucle principale qui tourne à vide 8 fois de suite sans appeler aucun modèle fait sauter le temps
+    au prochain événement (1 ms au plus) ;
+  * une instruction `b .` saute directement au prochain événement.
+
+  Les échéances restent exactes, seul le nombre de tours de boucle change.
+
+## Ajouter un modèle
+
+Un modèle s'attache au jumeau par `tw.on('nom_de_fonction', fn)`. `fn` reçoit les arguments AAPCS et
+renvoie r0 (ou `PASS` pour exécuter la vraie fonction). Si la fonction est en ROM, le repli est
+automatique. Le modèle programme ses échéances par `tw.schedule(cycles, fn)` et déclenche les rappels du
+firmware par `tw.irq(nom, adresse, args, blobs)`. Son état est remis à zéro au reset par
+`tw.reset_listeners`.
+
+## Ancien simulateur
+
+`gr5515_sim.py`, `test_hello.py` et `test_arduino.py` restent en place, et leurs 45 + 34 vérifications sont
+toujours vertes. Ils valident le firmware de test `hello`, désormais figé. `rom_check.py` compare les appels
+ROM du firmware Seeed à notre table de symboles.

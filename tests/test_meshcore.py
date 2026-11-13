@@ -142,6 +142,27 @@ class TestNoeudSeul:
     def test_pas_d_ecriture_flash_hors_zones(self, node):
         assert flash_writes_outside(node) == []
 
+    def test_endurance(self, node, comp, pytestconfig):
+        """N h virtuelles (--endurance-h, 1 par défaut) connecté au téléphone : ni redémarrage, ni dérive de
+        l'horloge, ni fuite de tas."""
+        hours = pytestconfig.getoption('endurance_h')
+        tw = node.tw
+        start = NOW + 86400            # l'horloge a pu être réglée par le GNSS : on avance (MeshCore refuse de reculer)
+        assert [d['code'] for d in comp.set_time(start)][-1:] == [0]
+        t0 = tw.now_ms()
+        heap = lambda: (tw.r32(tw.var['heap_end.0']), tw.r32(tw.var['__malloc_max_sbrked_mem']))
+        h0, n_resets, refresh0 = heap(), len(tw.resets), node.wdt.refreshes
+        node.run(int(hours * 3_600_000))
+        r = [d for d in comp.query(bytes([5]), expect=9) if d['code'] == 9]
+        assert r, 'pas de réponse à GET_DEVICE_TIME'
+        epoch = struct.unpack_from('<I', r[0]['raw'], 1)[0]
+        elapsed = (tw.now_ms() - t0) / 1000
+        assert abs(epoch - (start + elapsed)) <= 2, f'horloge : {epoch - start} s pour {elapsed:.0f} s écoulées'
+        assert len(tw.resets) == n_resets, tw.resets
+        assert heap() == h0, f'le tas a grossi : {h0} → {heap()}'
+        assert node.wdt.refreshes - refresh0 > hours * 3600 / 8, 'chien de garde rafraîchi pendant la veille'
+        assert node.phone.connected
+
     def test_veille_entre_deux_tics(self, node):
         tw = node.tw
         s0, c0 = tw.slept, tw.cycles

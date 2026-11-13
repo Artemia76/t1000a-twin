@@ -30,6 +30,7 @@ def pytest_addoption(parser):
     for k, v in DEFAULTS.items():
         parser.addoption(f'--{k}', default=v, help=f'ELF {k} (défaut : {v})')
     parser.addoption('--firmware', default=None, help='valider uniquement cet ELF (garde-fou avant flash)')
+    parser.addoption('--endurance-h', type=float, default=1.0, help="durée virtuelle du test d'endurance (h)")
 
 
 def is_meshcore(path):
