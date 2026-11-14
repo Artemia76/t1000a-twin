@@ -1,7 +1,7 @@
 """Configuration pytest du jumeau numérique T1000-A.
 
 Firmwares testés (chemins par défaut, ou options) :
-  --meshcore  ELF du compagnon MeshCore BLE (third_party/meshcore/.pio/build/t1000a_companion_radio_ble/firmware.elf)
+  --meshcore  ELF du compagnon MeshCore BLE (firmware/meshcore/.pio/build/t1000a_companion_radio_ble/firmware.elf)
   --blink     ELF de l'exemple platform-gr551x (BleConsole)
   --firmware  un seul ELF à valider (garde-fou avant flash) : les tests génériques s'appliquent à lui, les tests
               MeshCore seulement s'il s'agit d'un firmware MeshCore.
@@ -15,7 +15,7 @@ ROOT = os.path.abspath(os.path.join(HERE, '..', '..', '..'))
 sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..')))
 
 DEFAULTS = {
-    'meshcore': f'{ROOT}/third_party/meshcore/.pio/build/t1000a_companion_radio_ble/firmware.elf',
+    'meshcore': f'{ROOT}/firmware/meshcore/.pio/build/t1000a_companion_radio_ble/firmware.elf',
     'blink': f'{ROOT}/platform/gr551x/examples/blink/.pio/build/t1000-a/firmware.elf',
 }
 
