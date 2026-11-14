@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..')))
 
 DEFAULTS = {
     'meshcore': f'{ROOT}/third_party/meshcore/.pio/build/t1000a_companion_radio_ble/firmware.elf',
-    'blink': f'{ROOT}/platform-gr551x/examples/blink/.pio/build/t1000-a/firmware.elf',
+    'blink': f'{ROOT}/platform/gr551x/examples/blink/.pio/build/t1000-a/firmware.elf',
 }
 
 # Zones de Flash que nos firmwares ont le droit d'écrire (variante t1000-a de platform-gr551x)
