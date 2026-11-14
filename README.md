@@ -103,3 +103,9 @@ firmware par `tw.irq(nom, adresse, args, blobs)`. Son état est remis à zéro a
 `gr5515_sim.py`, `test_hello.py` et `test_arduino.py` restent en place, et leurs 45 + 34 vérifications sont
 toujours vertes. Ils valident le firmware de test `hello`, désormais figé. `rom_check.py` compare les appels
 ROM du firmware Seeed à notre table de symboles.
+
+## Licence
+
+[MIT](LICENSE), © 2026 Artemia76. Les dépendances installées par `requirements.txt` gardent leur licence
+(Unicorn : GPL-2.0, pyelftools : domaine public, pytest : MIT) ; elles ne sont pas incluses dans ce dépôt.
+Projet indépendant, sans lien avec Seeed Studio ni Goodix.
