@@ -421,6 +421,7 @@ class Pwm:
         tw.on('app_pwm_stop', self._stop)
         tw.on('app_pwm_update_freq', self._freq)
         tw.on('app_pwm_config_channel', self._config)
+        tw.on('gr551x_pwm_set_level', self._level)      # analogWrite() : comparateur écrit directement
 
     def _init(self, p):
         L = self.tw.L
@@ -457,6 +458,12 @@ class Pwm:
             self.running[pid] = freq
             self.tw.log('pwm', id=pid, freq=freq)
         return OK
+
+    def _level(self, pid, channel, level):
+        self.cfg_duty[pid] = round((level & 0xFF) * 100 / 255)
+        if pid in self.running:
+            self.duty[pid] = self.cfg_duty[pid]
+        return None
 
     def _config(self, pid, channel, p_cfg):
         duty = self.tw.read(p_cfg, 1)[0]            # app_pwm_channel_init_t : duty (uint8_t) en tête
