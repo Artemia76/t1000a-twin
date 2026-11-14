@@ -5,13 +5,16 @@ erreur au démarrage ne se rattrape que par la récupération « bouton + câble
 exécute **le firmware réel (l'ELF compilé)** sur un modèle du GR5515 et de ses composants. On y fait
 passer les tests avant tout flash, et `t1000_ble.py flash` refuse un firmware qui échoue.
 
+Dépôt autonome, monté en sous-module `emulator/twin` du dépôt racine
+[T1000A](https://github.com/Artemia76/T1000A). Il y trouve le SDK Goodix (symboles de la ROM) et les firmwares
+construits (voir `twin/paths.py` ; hors de T1000A : `T1000_ROOT=…` ou `GR551X_SDK=…`).
+
 ```
-git submodule update --init platform/gr551x         # plateforme (exemple blink, outils BLE)
-pip install -r tools/sim/requirements.txt            # unicorn, pyelftools, pytest
-python -m pytest tools/sim/tests -q                  # suite complète (≈ 6 min)
-python -m pytest tools/sim/tests -q --firmware X.elf # un seul firmware (ce que fait le garde-fou)
-python -m pytest tools/sim/tests -q --endurance-h 24 # endurance de 24 h virtuelles (≈ 5 min de plus)
-python tools/sim/run_twin.py firmware.elf -n 2       # jumeaux en temps réel, joignables en TCP
+pip install -r requirements.txt                      # unicorn, pyelftools, pytest
+python -m pytest tests -q                            # suite complète (≈ 6 min)
+python -m pytest tests -q --firmware X.elf           # un seul firmware (ce que fait le garde-fou)
+python -m pytest tests -q --endurance-h 24           # endurance de 24 h virtuelles (≈ 5 min de plus)
+python run_twin.py firmware.elf -n 2                 # jumeaux en temps réel, joignables en TCP
 meshcore-cli -t 127.0.0.1 -p 5000 infos              # le vrai client MeshCore sur le jumeau
 nc 127.0.0.1 5100                                    # console BLE de secours du nœud 0
 ```
@@ -55,7 +58,7 @@ sans aucun décalage codé en dur.
 
 ## Garde-fou avant flash
 
-`tools/t1000_ble.py flash X_dfu.bin` cherche l'ELF voisin (`X.elf`) et lance la suite avec `--firmware X.elf`.
+`t1000_ble.py flash X_dfu.bin` (outil de la plateforme gr551x) cherche l'ELF voisin (`X.elf`) et lance la suite avec `--firmware X.elf`.
 Le flash est refusé si un test échoue, ou si le jumeau ou l'ELF sont introuvables. `--skip-twin` force le
 flash ; avec PlatformIO, c'est `custom_upload_skip_twin = yes`. Si le Python courant n'a pas unicorn,
 pyelftools et pytest, `T1000_TWIN_PYTHON` désigne celui qui les a, et `T1000_TWIN_DIR` indique le dossier du

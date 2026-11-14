@@ -11,8 +11,8 @@ import os, sys
 import pytest
 
 HERE = os.path.dirname(__file__)
-ROOT = os.path.abspath(os.path.join(HERE, '..', '..', '..'))
 sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..')))
+from twin.paths import ROOT  # dépôt T1000A (voir twin/paths.py)
 
 DEFAULTS = {
     'meshcore': f'{ROOT}/firmware/meshcore/.pio/build/t1000a_companion_radio_ble/firmware.elf',

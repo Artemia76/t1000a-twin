@@ -24,8 +24,7 @@ from unicorn import Uc, UcError, UC_ARCH_ARM, UC_MODE_THUMB, UC_MODE_MCLASS, UC_
     UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE, UC_HOOK_INTR, UC_HOOK_MEM_UNMAPPED, UC_PROT_ALL
 from unicorn.arm_const import *
 
-ROOT = __file__.rsplit('/tools/', 1)[0]
-ROM_SYMS = f'{ROOT}/third_party/gr551x-sdk/platform/soc/linker/gcc/rom_symbol_gcc.txt'
+from twin.paths import rom_syms
 
 ROM_BASE, ROM_SIZE = 0x00000000, 0x00080000
 RAM_SIZE = 0x00040000
@@ -60,7 +59,7 @@ class GR5515Sim:
         self.pc_hist = Counter()
 
         self.rom = {}
-        for line in open(ROM_SYMS):
+        for line in open(rom_syms()):
             m = re.match(r'\s*(\w+)\s*=\s*(0x[0-9a-fA-F]+)', line)
             if m:
                 self.rom[int(m.group(2), 16) & ~1] = m.group(1)

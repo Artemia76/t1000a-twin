@@ -23,9 +23,8 @@ from unicorn.arm_const import *
 from elftools.elf.elffile import ELFFile
 
 from .layouts import Layouts
+from .paths import rom_syms
 
-ROOT = __file__.rsplit('/tools/', 1)[0]
-ROM_SYMS = f'{ROOT}/third_party/gr551x-sdk/platform/soc/linker/gcc/rom_symbol_gcc.txt'
 
 F_CPU = 64_000_000
 ROM_BASE, ROM_SIZE = 0x00000000, 0x00080000
@@ -94,7 +93,7 @@ class Twin:
             self.addr2sym.setdefault(v, k)
         self._sorted_funcs = sorted(self.addr2sym)
         self.rom = {}
-        for line in open(ROM_SYMS):
+        for line in open(rom_syms()):
             m = re.match(r'\s*(\w+)\s*=\s*(0x[0-9a-fA-F]+)', line)
             if m:
                 self.rom[int(m.group(2), 16) & ~1] = m.group(1)

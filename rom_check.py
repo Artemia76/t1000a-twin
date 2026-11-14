@@ -6,15 +6,17 @@ puis vérifie qu'elles tombent sur des points d'entrée de la table de symboles 
 (platform/soc/linker/gcc/rom_symbol_gcc.txt). Si les adresses correspondent, la ROM de la puce
 est celle pour laquelle le SDK est compilé.
 
-Usage : rom_check.py [firmware_seeed.bin]
+Usage : rom_check.py <firmware_seeed.bin>
 """
 import re, struct, sys, capstone
 from collections import Counter
 from capstone import arm
 
-ROOT = __file__.rsplit('/tools/', 1)[0]
-FW = sys.argv[1] if len(sys.argv) > 1 else f'{ROOT}/tracker-t1000-ab-app-ble-release-v2.5-2024-01-02-01_115108.bin'
-SYM = f'{ROOT}/third_party/gr551x-sdk/platform/soc/linker/gcc/rom_symbol_gcc.txt'
+from twin.paths import rom_syms
+if len(sys.argv) < 2:
+    sys.exit('usage : rom_check.py <firmware Seeed .bin>')
+FW = sys.argv[1]
+SYM = rom_syms()
 BASE, CODE_END = 0x0101B000, 0x52000
 
 syms = {}

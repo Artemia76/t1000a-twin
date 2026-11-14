@@ -7,8 +7,9 @@ démarre le firmware et vérifie un comportement de sécurité. Code de sortie 0
 import struct, sys
 sys.path.insert(0, __file__.rsplit('/', 1)[0])
 from gr5515_sim import GR5515Sim, Stop, Reset
+from twin.paths import in_root
 
-ELF = sys.argv[1] if len(sys.argv) > 1 else 'firmware/hello/build/t1000a_hello.elf'
+ELF = sys.argv[1] if len(sys.argv) > 1 else in_root('firmware', 'hello', 'build', 't1000a_hello.elf')
 GUARD, FLAG, NVDS, DIAG = 0x010E3000, 0x010E4000, 0x010FC000, 0x010E2000
 ALLOWED_WRITES = [(GUARD, 0x1000), (FLAG, 0x1000), (NVDS, 0x1000), (DIAG, 0x1000)]
 MAGIC = b'T1GD'

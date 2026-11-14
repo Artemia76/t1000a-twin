@@ -1,4 +1,4 @@
-# Jumeau numérique T1000-A (tools/sim) : pip install -r tools/sim/requirements.txt
+# Jumeau numérique T1000-A : pip install -r requirements.txt
 unicorn>=2.1
 pyelftools>=0.31
 pytest>=8

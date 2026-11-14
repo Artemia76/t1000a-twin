@@ -1,4 +1,4 @@
-"""Jumeau numérique du SenseCAP T1000-A (GR5515 + LR1110 + AG3335), voir tools/sim/README.md."""
+"""Jumeau numérique du SenseCAP T1000-A (GR5515 + LR1110 + AG3335), voir README.md."""
 from .core import Twin, Stop, Reset, F_CPU, ms
 from .board import T1000A
 from .world import World, Ether
