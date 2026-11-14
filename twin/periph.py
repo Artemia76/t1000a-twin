@@ -407,35 +407,46 @@ class Adc:
 
 
 class Pwm:
-    """app_pwm : on journalise la fréquence produite (buzzer)."""
+    """app_pwm : on journalise la fréquence produite (buzzer) et le rapport cyclique (LED, analogWrite)."""
 
     def __init__(self, tw):
         self.tw = tw
         self.params = {}                    # id -> fréquence configurée
         self.running = {}
+        self.cfg_duty = {}                  # id -> rapport cyclique configuré (%) de la voie active
+        self.duty = {}                      # id -> rapport cyclique produit (%), module démarré seulement
         tw.on('app_pwm_init', self._init)
         tw.on('app_pwm_deinit', self._deinit)
         tw.on('app_pwm_start', self._start)
         tw.on('app_pwm_stop', self._stop)
         tw.on('app_pwm_update_freq', self._freq)
+        tw.on('app_pwm_config_channel', self._config)
 
     def _init(self, p):
         L = self.tw.L
-        d = self.tw.read(p, 72)
+        d = self.tw.read(p, L.size('app_pwm_params_t'))
         pid = L.get(d, 'app_pwm_params_t', 'id')
         self.params[pid] = L.get(d, 'app_pwm_params_t', 'init.freq')
+        active = L.get(d, 'app_pwm_params_t', 'active_channel')
+        for bit, ch in ((1, 'a'), (2, 'b'), (4, 'c')):
+            if active & bit:
+                self.cfg_duty[pid] = L.get(d, 'app_pwm_params_t', f'init.channel_{ch}.duty')
+                break
         return OK
 
     def _deinit(self, pid):
         self.running.pop(pid, None)
+        self.duty.pop(pid, None)
         return OK
 
     def _start(self, pid):
         self.running[pid] = self.params.get(pid, 0)
-        self.tw.log('pwm', id=pid, freq=self.running[pid])
+        self.duty[pid] = self.cfg_duty.get(pid, 0)
+        self.tw.log('pwm', id=pid, freq=self.running[pid], duty=self.duty[pid])
         return OK
 
     def _stop(self, pid):
+        self.duty.pop(pid, None)
         if self.running.pop(pid, None) is not None:
             self.tw.log('pwm', id=pid, freq=0)
         return OK
@@ -445,6 +456,13 @@ class Pwm:
         if pid in self.running:
             self.running[pid] = freq
             self.tw.log('pwm', id=pid, freq=freq)
+        return OK
+
+    def _config(self, pid, channel, p_cfg):
+        duty = self.tw.read(p_cfg, 1)[0]            # app_pwm_channel_init_t : duty (uint8_t) en tête
+        self.cfg_duty[pid] = duty
+        if pid in self.running:
+            self.duty[pid] = duty
         return OK
 
 
