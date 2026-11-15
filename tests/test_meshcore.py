@@ -53,7 +53,7 @@ class TestNoeudSeul:
         assert r.unknown_cmds == [], 'commandes LR1110 non modélisées : ' + str(r.unknown_cmds)
         assert r.violations == [], 'protocole SPI/BUSY non respecté : ' + str(r.violations)
         assert r.packet_type == 2, 'LoRa'
-        assert r.mode == MODE_RX and r.rx_continuous, 'réception continue après le démarrage'
+        assert r.mode == MODE_RX and (r.rx_continuous or r.duty is not None), 'en réception (continue ou cyclique)'
         assert r.dio_mask & IRQ_RX_DONE, 'RX_DONE routé sur la ligne IRQ'
         assert r.tcxo is not None, 'TCXO configuré (LR11X0_DIO3_TCXO_VOLTAGE)'
 

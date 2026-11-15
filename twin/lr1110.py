@@ -58,6 +58,8 @@ class LR1110:
         self.commands = []                  # (cycles, opcode, paramètres) — trace complète
         self.tx_packets = []
         self.rx_packets = []
+        self.rx_missed = 0                  # trames manquées pendant le sommeil du cycle d'écoute
+        self.duty_runs = 0                  # passages en écoute cyclique
         self.trace_cmds = False
         self.noise_floor = -110.0
         self._power_on_reset()
@@ -92,6 +94,8 @@ class LR1110:
         self.rx_timeout_ev = None
         self.rx_continuous = False
         self.receiving = None               # paquet en cours de réception (verrouillé sur son préambule)
+        self.duty = None                    # écoute cyclique (SetRxDutyCycle) : {'rx', 'sl', 't0'} en cycles CPU
+        self.duty_ev = None
         self.stats = [0, 0, 0, 0]
         self._sel = False
 
@@ -104,6 +108,8 @@ class LR1110:
     def _set_busy(self, level, duration_us=None):
         self.tw.cancel(self.busy_ev)
         self.busy_ev = None
+        if not level and self.duty is not None and not self.duty_awake():
+            level = 1                                   # endormie dans son cycle : BUSY reste haut
         self.busy = bool(level)
         self.gpio.drive(self.busy_pin, 1 if level else 0)
         if level and duration_us is not None:
@@ -135,6 +141,10 @@ class LR1110:
     def select(self):
         if self.in_reset:
             self.violations.append((self.tw.now(), 'NSS bas pendant le reset'))
+        if self.duty is not None and not self.duty_awake() and self.receiving is None:
+            self.violations.append((self.tw.now(), 'NSS bas pendant le sommeil du cycle d\'écoute'))
+            self._duty_stop()
+            self.mode = MODE_SLEEP                      # NSS réveille la radio : sortie du cycle (STBY_RC)
         if self.mode == MODE_SLEEP:
             self._sel = 'wake'
             self.mode = MODE_STBY_RC
@@ -201,8 +211,19 @@ class LR1110:
         elif op == 0x010D:
             resp = b'\x00\x00'
         elif op in (0x010E, 0x0110, 0x0112, 0x0116, 0x012A, 0x0128, 0x0208, 0x0212, 0x0213, 0x0215, 0x0217,
-                    0x021B, 0x0224, 0x0225, 0x0229, 0x0206, 0x020D, 0x0214):
+                    0x021B, 0x0224, 0x0225, 0x0229, 0x0206, 0x020D):
             pass                                        # réglages sans effet sur le modèle
+        elif op == 0x0214:                              # SetRxDutyCycle(rxPeriod, sleepPeriod, mode), pas de 30,52 µs
+            rx_us = int.from_bytes(p[0:3], 'big') * 1_000_000 // 32768
+            sl_us = int.from_bytes(p[3:6], 'big') * 1_000_000 // 32768
+            self._abort_radio()
+            self.mode = MODE_RX
+            self.rx_continuous = False                  # après une réception : STBY_RC
+            self.duty = {'rx': rx_us * 64, 'sl': (sl_us + 1000) * 64, 't0': tw.now()}   # + transitions (~1 ms)
+            self.duty_runs += 1
+            tw.log('lr1110_rx_duty', rx_ms=rx_us / 1000, sleep_ms=sl_us / 1000)
+            self._duty_tick()
+            return
         elif op == 0x010F:
             busy_us = 5000                              # calibration complète
         elif op == 0x0111:
@@ -322,6 +343,7 @@ class LR1110:
         return self.noise_floor + self.rng.uniform(-3.0, 3.0)      # bruit propre à chaque radio
 
     def _abort_radio(self):
+        self._duty_stop()
         self.tw.cancel(self.op_ev)
         self.tw.cancel(self.rx_timeout_ev)
         self.op_ev = self.rx_timeout_ev = None
@@ -371,6 +393,62 @@ class LR1110:
             self._raise_irq(IRQ_CAD_DONE | (IRQ_CAD_DETECTED if busy else 0))
         self.op_ev = self.tw.schedule(dur * 64, done)
 
+    # ------------------------------------------------------------------ écoute cyclique (SetRxDutyCycle)
+    def duty_awake(self, t=None):
+        d = self.duty
+        if d is None:
+            return True
+        t = self.tw.now() if t is None else t
+        return (t - d['t0']) % (d['rx'] + d['sl']) < d['rx']
+
+    @property
+    def duty_share(self):
+        d = self.duty
+        return d['rx'] / (d['rx'] + d['sl']) if d else 1.0
+
+    def _duty_tick(self):
+        """Bascule BUSY au début et à la fin de chaque fenêtre d'écoute."""
+        self.duty_ev = None
+        d = self.duty
+        if d is None or self.receiving is not None:
+            return
+        now = self.tw.now()
+        ph = (now - d['t0']) % (d['rx'] + d['sl'])
+        awake = ph < d['rx']
+        if not self.busy_ev:
+            self.busy = not awake
+            self.gpio.drive(self.busy_pin, 0 if awake else 1)
+        nxt = (d['rx'] - ph) if awake else (d['rx'] + d['sl'] - ph)
+        self.duty_ev = self.tw.schedule(max(1, nxt), self._duty_tick)
+
+    def _duty_stop(self):
+        if self.duty is None:
+            return
+        self.tw.cancel(self.duty_ev)
+        self.duty_ev = None
+        self.duty = None
+        if not self.busy_ev:
+            self.busy = False
+            self.gpio.drive(self.busy_pin, 0)
+
+    def _duty_catch(self, frame):
+        """Instant (cycles) où une fenêtre d'écoute a vu 8 symboles du préambule, ou None (trame manquée)."""
+        d = self.duty
+        sym = int(self.symbol_us() * 64)
+        t0f = self.tw.now()
+        t_end = t0f + int(frame['preamble'] * sym)
+        need = 8 * sym
+        c = d['rx'] + d['sl']
+        k = (t0f - d['t0']) // c - 1
+        while True:
+            ws = d['t0'] + k * c
+            if ws > t_end:
+                return None
+            ov = min(ws + d['rx'], t_end) - max(ws, t0f)
+            if ov >= need:
+                return max(ws, t0f) + need
+            k += 1
+
     # Appelés par l'éther (dans le temps de ce jumeau)
     def air_start(self, frame):
         """Début d'un paquet sur l'air, reçu avec frame['rssi'] / frame['snr']."""
@@ -380,6 +458,16 @@ class LR1110:
             return
         if not self._compatible(frame):
             return
+        if self.duty is not None:
+            if self._duty_catch(frame) is None:
+                self.rx_missed += 1
+                self.tw.log('lora_rx_missed', len=len(frame['data']), preamble=frame['preamble'])
+                return
+            self.tw.cancel(self.duty_ev)                # verrouillée sur le préambule : reste éveillée
+            self.duty_ev = None
+            if not self.busy_ev:
+                self.busy = False
+                self.gpio.drive(self.busy_pin, 0)
         rx = {'frame': frame, 'rssi': frame['rssi'], 'collided': False}
         self.receiving = rx
         sym = self.symbol_us()
@@ -412,6 +500,7 @@ class LR1110:
         self.rx_packets.append({'t': self.tw.now(), 'data': data, 'ok': not bad, 'rssi': frame['rssi'], 'snr': frame['snr']})
         self.tw.log('lora_rx', len=len(data), ok=not bad, rssi=frame['rssi'])
         if not self.rx_continuous:
+            self._duty_stop()
             self.mode = MODE_STBY_RC
         self._raise_irq(IRQ_RX_DONE | (IRQ_CRC_ERR if bad else 0))
 
