@@ -42,27 +42,20 @@ class T1000A:
         self.adc.sources[4] = lambda: self.battery_mv / 2 if self.gpio.level(BAT_EN) else 0.0
         self.gpio.drive(BUTTON, 0)
         # Arrêt véritable : sources de réveil configurées par le firmware, puis veille ultra-profonde
-        self.wake_ext = None                # (masque de broches AON, type) de hal_pwr_config_ext_wakeup
-        self.wake_comp = None               # (n° MSIO, seuil mV) du comparateur
+        self.wake_ext = {}                  # n° AON -> niveau qui réveille (hal_pwr_config_ext_wakeup)
         self.off_pins = None                # état des broches au moment de l'arrêt
         tw.on('hal_pwr_config_ext_wakeup', self._ext_wakeup)
-        tw.on('app_comp_init', self._comp_init)
-        tw.on('app_comp_start', lambda: 0)
         tw.on('pwr_mgmt_wakeup_source_setup', lambda src: None)
         tw.on('pwr_mgmt_ultra_sleep', self._ultra_sleep)
         tw.ultra_wake = self._ultra_wake
 
     # ------------------------------------------------------------------ arrêt véritable
     def _ext_wakeup(self, pins, typ):
-        self.wake_ext = (pins, typ)
+        level = 0 if typ & (1 << 8) else 1          # bit INVERT (AON_EXT_WKUP_CTL) : réveil au niveau bas
+        for n in range(6):
+            if pins & (1 << n):
+                self.wake_ext[n] = level
         return None
-
-    def _comp_init(self, p, handler):
-        L = self.tw.L
-        d = self.tw.read(p, L.size('app_comp_params_t'))
-        mask = L.get(d, 'app_comp_params_t', 'pin_cfg.input.pin')
-        self.wake_comp = ((mask & -mask).bit_length() - 1, L.get(d, 'app_comp_params_t', 'init.ref_value') * 30)
-        return 0
 
     def _ultra_sleep(self, time_ms):
         g = self.gpio.level
@@ -72,17 +65,8 @@ class T1000A:
         self.tw.enter_ultra_sleep()
 
     def _ultra_wake(self):
-        if self.wake_ext is not None:
-            pins, typ = self.wake_ext
-            level = 0 if typ & (1 << 8) else 1          # bit INVERT (AON_EXT_WKUP_CTL) : réveil au niveau bas
-            if pins & 1 and self.gpio.level(BUTTON) == level:   # AON0 = bouton
-                return True
-        if self.wake_comp is not None:
-            ch, mv = self.wake_comp
-            f = self.adc.sources.get(ch)
-            if f is not None and f() > mv:
-                return True
-        return False
+        """Réveil par une broche AON au niveau configuré (le comparateur MSIO ne réveille pas de ce mode)."""
+        return any(self.gpio.level(0x20 + n) == level for n, level in self.wake_ext.items())
 
     def is_off(self):
         return self.tw.state == 'ultra'

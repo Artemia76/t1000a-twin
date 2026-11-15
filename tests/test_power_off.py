@@ -1,10 +1,12 @@
 """Arrêt véritable du compagnon MeshCore : veille ultra-profonde du GR5515, réveil par le bouton ou le câble.
 
 - appui de 3 s (au-delà des 8 s de démarrage) : GNSS et son alimentation de secours, pont batterie (GPIO14) et
-  buzzer coupés, LR1110 en sommeil, puis veille ultra-profonde réveillable par AON0 et par le comparateur MSIO0 ;
-- éteint : un appui court rendort aussitôt le boîtier (sans compter un démarrage raté), un appui de 2 s le
-  rallume ; le maintien de 6 s reste le DFU ;
-- éteint, câble branché : la LED montre la charge sans démarrer MeshCore, le débranchement rendort.
+  buzzer coupés, LR1110 en sommeil, puis veille ultra-profonde réveillable par AON0 (bouton) et AON4 (charge) ;
+- éteint : le boîtier se rallume si le bouton est encore tenu quand l'application démarre (sur la carte, le
+  réveil par le bootloader prend 2 à 3 s : appui d'environ 3 s ; le jumeau démarre aussitôt, d'où 300 ms ici) ;
+  un appui plus court rendort aussitôt le boîtier, sans compter un démarrage raté ; le maintien de 6 s reste le DFU ;
+- éteint, début de charge (AON4 à 0) : la LED montre la charge sans démarrer MeshCore, le débranchement rendort ;
+  le comparateur MSIO ne réveillant pas de ce mode, un boîtier déjà chargé ne se réveille pas au branchement.
 """
 import re
 import pytest
@@ -48,12 +50,11 @@ def guard_count(n):
 def test_arret_puis_appuis_courts(meshcore_elf):
     n = power_off(meshcore_elf)
     assert n.off_pins == {'gps_en': 0, 'vrtc_en': 0, 'bat_en': 0, 'buzzer_en': 0, 'led': 0, 'lora_sleep': True}
-    assert n.wake_ext and n.wake_ext[0] & 1, 'réveil par le bouton (AON0)'
-    assert n.wake_comp == (0, 990), 'réveil par le comparateur sur MSIO0, seuil ≈ 1 V'
+    assert n.wake_ext == {0: 1, 4: 0}, 'réveil par le bouton (AON0 haut) et par le début de charge (AON4 bas)'
     assert n.tw.flash_bytes(OFF_REC, 4) == b'OFF1'
     assert not n.ble.adv_on
     for i in range(5):
-        n.press(300)
+        n.press(100)
         n.run(3000)
         assert n.is_off(), f'appui court n° {i + 1} : le boîtier doit se rendormir'
     assert resets(n).count('réveil après arrêt véritable') == 5
@@ -64,6 +65,9 @@ def test_arret_puis_appuis_courts(meshcore_elf):
 
 def test_appui_long_rallume(meshcore_elf):
     n = power_off(meshcore_elf)
+    for _ in range(2):
+        n.press(100)
+        n.run(2000)
     n.press(2600)
     n.run(8000)
     assert not n.is_off() and n.tw.state == 'run'
@@ -71,7 +75,7 @@ def test_appui_long_rallume(meshcore_elf):
     assert n.ble.adv_on, 'MeshCore a démarré : annonce BLE'
     con = Console(n).open()
     r = con.send('power')
-    assert re.search(r'last off: \d+h\d\dm .*bat 3900 -> \d+ mV', r), r
+    assert re.search(r'last off: bat 3900 -> \d+ mV, 2 wake\(s\) back to sleep', r), r
 
 
 def test_maintien_6s_dfu_depuis_eteint(meshcore_elf):
@@ -83,7 +87,11 @@ def test_maintien_6s_dfu_depuis_eteint(meshcore_elf):
 
 def test_charge_a_l_arret(meshcore_elf):
     n = power_off(meshcore_elf)
-    plug(n, charging=True)            # le comparateur réveille le boîtier
+    plug(n, charging=False)           # déjà chargé : AON4 reste à 1, pas de réveil
+    n.run(1500)
+    assert n.is_off()
+    unplug(n)
+    plug(n, charging=True)            # début de charge : AON4 à 0 réveille le boîtier
     n.run(1500)
     assert not n.is_off()
     duties = []
