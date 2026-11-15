@@ -67,6 +67,10 @@ class _Break(Exception):
     pass
 
 
+class _Off(Exception):
+    """Veille ultra-profonde (arrêt véritable) : le CPU s'arrête jusqu'à un réveil externe."""
+
+
 def ms(n):
     return int(n * F_CPU // 1000)
 
@@ -117,7 +121,8 @@ class Twin:
         self.rom_calls = {}
         self.calls = []                         # fonctions tracées (trace())
         self.resets = []                        # (cycles, raison)
-        self.state = 'off'                      # off / run / dfu / halted
+        self.state = 'off'                      # off / run / dfu / halted / ultra (arrêt véritable)
+        self.ultra_wake = None                  # ultra : fonction qui renvoie vrai quand un réveil externe a lieu
         self.stop_reason = None
 
         # Registres de crochets (réappliqués à chaque reconstruction du CPU)
@@ -648,6 +653,8 @@ class Twin:
                 res = 'yield'
         except _Sleep:
             res = 'sleep'
+        except _Off:
+            res = 'off'
         except _Break as e:
             res = 'break'
             self.stop_reason = str(e)
@@ -671,6 +678,10 @@ class Twin:
                 return
             ev = heapq.heappop(self._heap)
             ev[2](*ev[3])
+
+    def enter_ultra_sleep(self):
+        """Depuis un crochet : arrête le CPU (veille ultra-profonde) ; ultra_wake() décide du réveil."""
+        raise _Off()
 
     def power_on(self):
         self.state = 'run'
@@ -710,6 +721,20 @@ class Twin:
                 return 'condition'
             if end is not None and self.cycles >= end:
                 return 'temps'
+            if self.state == 'ultra':           # arrêt véritable : le temps passe d'événement en événement
+                if self.ultra_wake is not None and self.ultra_wake():
+                    self.state = 'run'
+                    self.reset('réveil après arrêt véritable')
+                    continue
+                t = self._next_event()
+                if t is None and end is None:
+                    return 'ultra'
+                target = end if t is None else (t if end is None else min(t, end))
+                if target > self.cycles:
+                    self.slept += target - self.cycles
+                    self.cycles = target
+                self._dispatch_due()
+                continue
             try:
                 if self.asleep:
                     if not self._sleep_until(end):
@@ -745,6 +770,10 @@ class Twin:
                         self.cycles = target
                 if r == 'break':
                     return 'arrêt: ' + self.stop_reason
+                if r == 'off':
+                    self.state = 'ultra'
+                    self.log('ultra_sleep')
+                    continue
                 if r == 'sleep':
                     self.asleep = True
                     self.sleeps += 1
