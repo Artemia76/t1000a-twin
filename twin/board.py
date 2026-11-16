@@ -23,7 +23,7 @@ GPS_EN, GPS_VRTC_EN = 28, 27
 
 class T1000A:
     def __init__(self, elf, name='t1000a', flash=None, seed=0, trace=False, passkey=123456, battery_mv=3900,
-                 radio=True, turbo=True):
+                 radio=True, turbo=None):
         self.tw = tw = Twin(elf, flash=flash, seed=seed, name=name, trace=trace, turbo=turbo)
         self.name = name
         self.world = None

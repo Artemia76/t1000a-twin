@@ -16,7 +16,7 @@ Principes
 * **Redémarrages** : un reset (chien de garde, AIRCR, `hal_nvic_system_reset`) relance le CPU en gardant la
   Flash ; les composants externes (LR1110, GNSS, téléphone) gardent leur propre état.
 """
-import ctypes, heapq, inspect, random, re, struct
+import ctypes, heapq, inspect, os, random, re, struct
 from unicorn import Uc, UcError, UC_ARCH_ARM, UC_MODE_THUMB, UC_MODE_MCLASS, UC_HOOK_CODE, \
     UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE, UC_HOOK_INTR, UC_HOOK_MEM_UNMAPPED, UC_PROT_ALL
 from unicorn.arm_const import *
@@ -46,6 +46,9 @@ COST_CLOCK = 16                                 # cycles comptés par lecture d'
 COST_IRQ = 120                                  # entrée + sortie d'interruption
 QUIET_LOOPS = 8                                 # tours de boucle « à vide » avant d'accélérer
 SPIN_SKIP = 64_000                              # saut maximal par tour accéléré (1 ms)
+POLL_MIN = 16                                   # lectures d'horloge consécutives avant d'accélérer une attente
+POLL_FRAC = 16                                  # saut ≤ durée de l'attente / POLL_FRAC (retard ≤ ≈ 6 %)
+POLL_SKIP = 256_000                             # saut maximal par lecture d'horloge (4 ms)
 
 PASS = object()
 _U32 = struct.Struct('<I')                                 # un crochet qui renvoie PASS laisse s'exécuter la fonction réelle
@@ -76,7 +79,7 @@ def ms(n):
 
 
 class Twin:
-    def __init__(self, elf_path, flash=None, seed=0, name='t1000a', trace=False, turbo=True):
+    def __init__(self, elf_path, flash=None, seed=0, name='t1000a', trace=False, turbo=None):
         self.name = name
         self.elf_path = elf_path
         self.trace_enabled = trace
@@ -127,6 +130,7 @@ class Twin:
 
         # Registres de crochets (réappliqués à chaque reconstruction du CPU)
         self.intercept = {}                     # adr -> fonction Python
+        self._pure, self._pure_last = set(), {} # lectures pures (on(..., pure=True)) et leur dernier résultat
         self.rom_handlers = {}                  # nom ROM -> fonction
         self.breakpoints = {}                   # adr -> raison
         self.traced = set()
@@ -140,11 +144,15 @@ class Twin:
         self.uc, self._running, self._hooked, self._skip_bp = None, False, set(), None
         self.asleep, self.sleeps, self.slept = False, 0, 0
         # Accélération des boucles d'attente actives : voir _pwr_schedule
-        self.turbo = turbo
+        self.turbo = turbo if turbo is not None else os.environ.get('TWIN_TURBO', '1') != '0'   # TWIN_TURBO=0 : exécution brute
         self._model_calls = self._calls_at_sched = 0
         self._quiet = 0
         self._yield = False
         self.spin_skipped = 0
+        # Accélération des attentes actives (delay(), delay_ms du SDK…) : voir _clock_poll
+        self._poll_n, self._poll_t0, self._poll_calls = 0, 0, -1
+        self.poll_skipped = 0
+        self._in_call = False                   # call() : appel synchrone, les interruptions ne sont pas servies
         from collections import Counter
         self.pc_samples = Counter()
 
@@ -327,7 +335,8 @@ class Twin:
             r = self._exec(start, min(SLICE * 10, limit - done), until=TRAMP)
             if r == 'until':
                 return
-            done += SLICE * 10
+            if r == 'count':                    # un arrêt sur événement (saut de temps) n'épuise pas le budget
+                done += SLICE * 10
             if done >= limit:
                 raise Stop(f'{what} : {limit} instructions sans retour ({self.where(self.pc())})')
             start = self.pc() | 1
@@ -444,8 +453,10 @@ class Twin:
         return self.r32(self.uc.reg_read(UC_ARM_REG_SP) + 4 * (i - 4))
 
     # ------------------------------------------------------------------ crochets
-    def on(self, name, fn):
-        """Remplace la fonction `name` du firmware par fn(*args) (arguments AAPCS ; renvoie r0, None ou PASS)."""
+    def on(self, name, fn, pure=False):
+        """Remplace la fonction `name` du firmware par fn(*args) (arguments AAPCS ; renvoie r0, None ou PASS).
+        pure=True : simple lecture, qui ne compte comme activité (voir _pwr_schedule, _clock_poll) que si son
+        résultat change ; une boucle qui relit une broche immobile reste une attente."""
         if not self.has(name):
             if name in self.rom_names:                  # fonction en ROM : remplacée au niveau de la ROM
                 self.on_rom(name, fn)
@@ -454,6 +465,8 @@ class Twin:
         a = self.addr(name)
         n = len(inspect.signature(fn).parameters)
         self.intercept[a] = (fn, n, name)
+        if pure:
+            self._pure.add(a)
         self._hook_addr(a)
         return True
 
@@ -493,10 +506,19 @@ class Twin:
         h = self.intercept.get(addr)
         if h:
             fn, n, name = h
-            if fn != self._pwr_schedule:
-                self._model_calls += 1
+            if fn in self._probes:              # simple point de mesure : la vraie fonction s'exécute
+                fn()
+                return
             self.cycles_add(COST_CALL)
-            ret = fn(*[self.arg(i) for i in range(n)])
+            args = [self.arg(i) for i in range(n)]
+            ret = fn(*args)
+            if addr in self._pure:
+                key = (addr, *args)
+                if self._pure_last.get(key, PASS) != ret:
+                    self._pure_last[key] = ret
+                    self._model_calls += 1
+            elif fn != self._pwr_schedule:
+                self._model_calls += 1
             if ret is not PASS:
                 self._return(ret)
 
@@ -566,11 +588,10 @@ class Twin:
     def _on_sys_read(self, uc, access, addr, size, value, _):
         if addr == 0xE0001004:                       # DWT->CYCCNT : n'avance que si TRCENA et CYCCNTENA
             self.cycles_add(COST_CLOCK)
-            if (self.r32(0xE000EDFC) >> 24) & 1 and self.r32(0xE0001000) & 1:
-                v = (self.now() - self._dwt_frozen) & 0xFFFFFFFF
-            else:
-                v = self.r32(addr)
-            uc.mem_write(addr, struct.pack('<I', v))
+            sb = self._sys
+            if (_U32.unpack_from(sb, 0xEDFC)[0] >> 24) & 1 and _U32.unpack_from(sb, 0x1000)[0] & 1:
+                self._clock_poll()
+                _U32.pack_into(sb, 0x1004, (self.now() - self._dwt_frozen) & 0xFFFFFFFF)
         elif addr == 0xE000E018:                     # SysTick->VAL descend
             self.cycles_add(COST_CLOCK)
             load = (self.r32(0xE000E014) & 0xFFFFFF) + 1
@@ -594,6 +615,10 @@ class Twin:
         self.on('hal_nvic_system_reset', self._sw_reset)
         self.on('pwr_mgmt_mode_set', self._pwr_mode_set)
         self.on('pwr_mgmt_schedule', self._pwr_schedule)
+        self._probes = (self._clock_poll, self._wait_start)
+        self.on('gr551x_ticks32k', self._clock_poll)     # millis(), micros(), delay() du cœur Arduino
+        for name in ('delay', 'delayMicroseconds'):       # début d'une attente : la série repart de zéro
+            self.on(name, self._wait_start)
         self.on_rom('hal_flash_sector_size', lambda: SECTOR)
         self.on_rom('hal_flash_get_info', self._rom_flash_info)
         try:
@@ -637,6 +662,39 @@ class Twin:
                 self._yield = True
                 self.uc.emu_stop()
         return None
+
+    def _wait_start(self):
+        """Entrée d'une fonction d'attente : la durée déjà attendue repart de zéro (deux attentes successives
+        sans appel de modèle entre elles ne doivent pas se cumuler)."""
+        self._poll_calls, self._poll_n, self._poll_t0 = self._model_calls, 0, self.now()
+
+    def _clock_poll(self):
+        """Lecture d'horloge (entrée de gr551x_ticks32k, lecture de DWT->CYCCNT) : accélère les attentes actives.
+
+        Tant que le firmware relit l'horloge sans appeler aucun modèle (ni E/S, ni radio, ni Flash, ni BLE) et
+        sans interruption à servir, il ne fait qu'attendre : après POLL_MIN lectures, chaque lecture fait sauter
+        le temps d'au plus 1/POLL_FRAC de la durée déjà attendue (au plus POLL_SKIP), sans dépasser le prochain
+        événement. Une attente se termine donc au plus ≈ 6 % trop tard ; les échéances restent exactes : en
+        atteignant un événement, la tranche s'arrête pour le traiter et injecter ses interruptions."""
+        if not self.turbo or self._in_irq or (self._pending and not self._in_call and self._irq_enabled()):
+            self._poll_n = 0
+            return
+        now = self.now()
+        if self._model_calls != self._poll_calls:
+            self._poll_calls, self._poll_n, self._poll_t0 = self._model_calls, 0, now
+            return
+        self._poll_n += 1
+        if self._poll_n < POLL_MIN:
+            return
+        jump = min(POLL_SKIP, (now - self._poll_t0) // POLL_FRAC)
+        t = self._next_event()
+        if t is not None and t - now <= jump:
+            jump = t - now
+            self._yield = True
+            self.uc.emu_stop()
+        if jump > 0:
+            self._slice_extra += jump
+            self.poll_skipped += jump
 
     # ================================================================== exécution
     def _exec(self, start, count, until=0):
@@ -817,7 +875,11 @@ class Twin:
             uc.reg_write(r, v & 0xFFFFFFFF)
         uc.reg_write(UC_ARM_REG_LR, TRAMP | 1)
         a = self.addr(name) if isinstance(name, str) else name
-        self._exec_until_tramp(a, f'appel {name}', limit=max_insn)
+        self._in_call = True
+        try:
+            self._exec_until_tramp(a, f'appel {name}', limit=max_insn)
+        finally:
+            self._in_call = False
         r0 = uc.reg_read(UC_ARM_REG_R0)
         uc.context_restore(ctx)
         return r0

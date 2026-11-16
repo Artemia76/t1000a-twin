@@ -32,7 +32,7 @@ class Gpio:
                          ('app_io_write_pin', self._write), ('app_io_read_pin', self._read),
                          ('app_io_toggle_pin', self._toggle),
                          ('app_io_event_register_cb', self._register), ('app_io_event_unregister', self._unregister)):
-            tw.on(name, fn)
+            tw.on(name, fn, pure=(name == 'app_io_read_pin'))
 
     def _reset(self):
         self.cfg = {}                               # broche -> dict(mode, pull)
