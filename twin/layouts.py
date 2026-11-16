@@ -44,7 +44,7 @@ class Layouts:
         if data is None:
             data = self._parse()
             os.makedirs(CACHE_DIR, exist_ok=True)
-            tmp = self.cache + '.tmp'
+            tmp = f'{self.cache}.{os.getpid()}.tmp'   # un fichier par processus (tests en parallèle)
             with open(tmp, 'w') as f:
                 json.dump(data, f)
             os.replace(tmp, self.cache)
