@@ -11,13 +11,19 @@ import random
 import re
 import struct
 import pytest
-from conftest import MAGIC, preset
+from conftest import MAGIC, preset, symbols
 from test_console import Console
 from twin import T1000A, World, time_on_air_us
 from twin.companion import Companion, decode
 from twin.lr1110 import BW_KHZ
 
 NOW = 1794571200
+
+
+@pytest.fixture(scope='module', autouse=True)
+def _firmware_rx_duty(meshcore_elf):
+    if not any('RxDutySet' in n for n in symbols(meshcore_elf)):
+        pytest.skip('firmware sans cycle veille/écoute (rx-duty)')
 
 
 @pytest.fixture(scope='module')
@@ -48,11 +54,12 @@ def inject(n, preamble, count=40, seed=1):
 def test_cycle_actif_apres_calibration(node):
     r = node.radio
     assert r.duty is not None, 'la réception doit être en cycle veille/écoute'
-    assert 0.30 <= r.duty_share <= 0.45, f'part d\'écoute {r.duty_share:.1%}'
+    # fenêtre assez longue pour attendre l'en-tête après la détection (2 × rx + sommeil) : ≈ 48 %
+    assert 0.44 <= r.duty_share <= 0.52, f'part d\'écoute {r.duty_share:.1%}'
     out = node.con.send('rxduty')
     m = re.search(r'rxduty: on, cycling, listen (\d+) ms / sleep (\d+) ms \(([\d.]+) %\), noise floor (-\d+) dBm', out)
     assert m, out
-    assert 30 <= int(m.group(1)) <= 45 and 50 <= int(m.group(2)) <= 70
+    assert 54 <= int(m.group(1)) <= 66 and 50 <= int(m.group(2)) <= 70
     assert int(m.group(4)) < -60, 'bruit de fond mesuré (écoute continue au démarrage)'
     levels = set()
     for _ in range(40):
@@ -82,7 +89,7 @@ def test_repos_10_min_sans_spi_pendant_le_sommeil(node):
     assert r.duty is not None
     rows = [l for l in node.con.send('power log', wait_ms=1000).splitlines() if l and not l.startswith('#')]
     assert rows and int(rows[0].split(',')[11], 16) & 0x80, 'drapeau F_RX_DUTY dans le journal'
-    assert re.search(r'rx duty 3\d\.\d %', node.con.send('power'))
+    assert re.search(r'rx duty 4\d\.\d %', node.con.send('power'))
 
 
 def test_off_on_et_reglage_conserve(node):

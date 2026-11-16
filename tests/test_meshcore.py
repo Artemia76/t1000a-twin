@@ -121,7 +121,8 @@ class TestNoeudSeul:
         assert p['power'] == 22
         expect = time_on_air_us(len(p['data']), p['sf'], BW_KHZ[p['bw']], p['cr'], p['preamble'])
         assert p['toa_us'] == expect
-        assert node.radio.mode == MODE_RX, 'retour en réception après l\'émission'
+        r = node.radio                                   # écoute cyclique : la puce peut dormir entre deux fenêtres
+        assert r.mode == MODE_RX or r.duty is not None, 'retour en réception après l\'émission'
 
     def test_gnss_position_dans_self_info(self, node, comp):
         node.gnss.fix(48.8584, 2.2945, 35.0)

@@ -54,6 +54,8 @@ CALIB_IMAGE_US, CALIBRATE_US = 6500, 31000
 RESET_US = 237_000
 WAKE_WARM_US, WAKE_COLD_US = 640, 13_300
 DUTY_RESTART_US = 5200          # fin de sommeil du cycle : redémarrage (TCXO) avant la fenêtre suivante
+DETECT_SYMBOLS = 3.25           # préambule détecté ≈ 3,25 symboles après le début de l'écoute (mesuré : lr pre)
+HEADER_SYMBOLS = 12.25          # fin du préambule → en-tête valide : synchronisation 4,25 + en-tête 8 symboles
 TX_RAMP_US = 142                # STBY_XOSC → TX (UM tableau 2-15)
 
 # Commandes dont la réponse se lit dans la transaction suivante : opcode -> fonction(params) -> octets
@@ -288,7 +290,8 @@ class LR1110:
                 self.mode = MODE_RX
                 self.rx_continuous = self.rx_single = False
                 t0 = tw.now() + busy_us * 64
-                self.duty = {'rx': rx_us * 64, 'sl': (sl_us + DUTY_RESTART_US) * 64, 't0': t0}
+                self.duty = {'rx': rx_us * 64, 'sl': (sl_us + DUTY_RESTART_US) * 64, 't0': t0,
+                             'lock': (2 * rx_us + sl_us) * 64}     # délai d'en-tête après détection (UM §7.2.6)
                 self.duty_runs += 1
                 tw.log('lr1110_rx_duty', rx_ms=rx_us / 1000, sleep_ms=sl_us / 1000)
                 self.duty_ev = tw.schedule(busy_us * 64, self._duty_tick)
@@ -518,12 +521,13 @@ class LR1110:
         self.duty = None
 
     def _duty_catch(self, frame):
-        """Instant (cycles) où une fenêtre d'écoute a vu 8 symboles du préambule, ou None (trame manquée)."""
+        """Instant (cycles) où une fenêtre d'écoute détecte le préambule (DETECT_SYMBOLS après le début de
+        l'écoute), ou None : le préambule tombe entièrement dans le sommeil."""
         d = self.duty
         sym = int(self.symbol_us() * 64)
         t0f = self.tw.now()
         t_end = t0f + int(frame['preamble'] * sym)
-        need = 8 * sym
+        need = int(DETECT_SYMBOLS * sym)
         c = d['rx'] + d['sl']
         k = (t0f - d['t0']) // c - 1
         while True:
@@ -546,22 +550,46 @@ class LR1110:
             return
         if not self._compatible(frame):
             return
-        if self.duty is not None:
-            if self._duty_catch(frame) is None:
-                self.rx_missed += 1
-                self.tw.log('lora_rx_missed', len=len(frame['data']), preamble=frame['preamble'])
-                return
-            # verrouillée sur le préambule : reste en RX jusqu'à la fin de la trame (UM §7.2.6)
-            self.tw.cancel(self.duty_ev)
-            self.duty_ev = None
-            self.mode = MODE_RX
-            if not self.busy_ev:
-                self._set_busy(0)
-        rx = {'frame': frame, 'rssi': frame['rssi'], 'collided': False, 'header': False}
-        self.receiving = rx
         sym = self.symbol_us()
-        t_pre = int((min(frame['preamble'], self.preamble) + 4.25) * sym)
-        t_hdr = t_pre + int(8 * sym)
+        now = self.tw.now()
+        t_hdr = now + int((frame['preamble'] + HEADER_SYMBOLS) * sym * 64)   # en-tête valide (absolu)
+        rx = {'frame': frame, 'rssi': frame['rssi'], 'collided': False, 'header': False}
+        if self.duty is None:
+            t_det = now + int(DETECT_SYMBOLS * sym * 64)
+            self.receiving = rx
+        else:
+            t_det = self._duty_catch(frame)
+            if t_det is None:
+                self.rx_missed += 1
+                self.tw.log('lora_rx_missed', len=len(frame['data']), preamble=frame['preamble'], why='sommeil')
+                return
+            d = self.duty
+            doomed = t_hdr > t_det + d['lock']          # en-tête après le délai 2 × rx + sommeil : trame perdue
+            self.receiving = rx                          # (le cycle continue jusqu'à la détection)
+            rx['pending'] = True
+
+            def detect():
+                if self.receiving is not rx or self.duty is not d:
+                    return
+                rx['pending'] = False
+                self.tw.cancel(self.duty_ev)            # verrouillée sur le préambule : reste en RX (UM §7.2.6)
+                self.duty_ev = None
+                self.mode = MODE_RX
+                if not self.busy_ev:
+                    self._set_busy(0)
+                self._raise_irq(IRQ_PREAMBLE)
+                if doomed:
+                    def lock_timeout():
+                        if self.receiving is rx and self.duty is d:
+                            self.receiving = None
+                            self.rx_missed += 1
+                            self.tw.log('lora_rx_missed', len=len(frame['data']), preamble=frame['preamble'],
+                                        why='délai d\'en-tête')
+                            self._duty_tick()
+                    self.tw.schedule(d['lock'], lock_timeout)
+                else:
+                    self.tw.schedule(t_hdr - self.tw.now(), header)
+            self.tw.schedule(t_det - now, detect)
 
         def preamble():
             if self.receiving is rx:
@@ -573,16 +601,9 @@ class LR1110:
                 rx['header'] = True
                 self.tw.cancel(self.rx_timeout_ev)
                 self._raise_irq(IRQ_HEADER_VALID)
-        self.tw.schedule(t_pre * 64, preamble)
-        self.tw.schedule(t_hdr * 64, header)
-        if self.duty is not None:
-            d = self.duty
-
-            def lock_timeout():                         # 2 × rx + sommeil sans en-tête : retour au cycle
-                if self.receiving is rx and not rx['header'] and self.duty is d:
-                    self.receiving = None
-                    self._duty_tick()
-            self.tw.schedule(t_pre * 64 + 2 * d['rx'] + d['sl'], lock_timeout)
+        if self.duty is None:
+            self.tw.schedule(t_det - now, preamble)
+            self.tw.schedule(t_hdr - now, header)
 
     def air_end(self, frame):
         rx = self.receiving

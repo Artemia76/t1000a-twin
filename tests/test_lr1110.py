@@ -278,7 +278,7 @@ def test_cycle_reset_status_rtc(h):
 
 
 def test_cycle_rx_done_stby_rc_et_fin_du_cycle(h):
-    duty(h)
+    duty(h, 56.0)                                            # fenêtre assez longue pour attendre l'en-tête
     while h.busy():
         h.tw.advance(100)
     receive(h, frame(h))
@@ -315,3 +315,36 @@ def test_cycle_commande_attend_la_fenetre(h):
         h.tw.advance(100)
     waited = h.wait_busy()
     assert 1_000 < waited <= 64_800
+
+
+# ------------------------------------------------------------------ délai d'en-tête en écoute cyclique
+def catch_rate(rx_ms, sl_ms, n=60):
+    """Trames de 32 symboles (SF8, 62,5 kHz) à des instants répartis sur le cycle : part reçue."""
+    h = Host()
+    h.wait_busy()
+    duty(h, rx_ms, sl_ms)
+    got = 0
+    period_us = (rx_ms + sl_ms + 5.2) * 1000
+    for i in range(n):
+        h.tw.advance(period_us * (i % 7 + 0.37 * i) % period_us + 3_000)
+        if h.r.duty is None:                                 # trame précédente reçue : relancer le cycle
+            r, s = round(rx_ms * 32.768), round(sl_ms * 32.768)
+            h.cmd(0x0114, 0xFF, 0xFF, 0xFF, 0xFF)
+            h.cmd(0x0214, *r.to_bytes(3, 'big'), *s.to_bytes(3, 'big'), 0)
+            h.wait_busy(70_000)
+        n0 = len(h.r.rx_packets)
+        f = frame(h)
+        h.r.air_start(f)
+        h.tw.advance(h.r.toa_us(len(f['data'])))
+        h.r.air_end(f)
+        got += len(h.r.rx_packets) > n0
+    return got / n
+
+
+def test_cycle_radiolib_perd_les_trames_de_32_symboles():
+    """Mesuré sur le boîtier : 6 trames sur 20 avec le cycle de RadioLib (en-tête après le délai 2 × rx + sommeil)."""
+    assert 0.2 <= catch_rate(36.8, 59.5) <= 0.4
+
+
+def test_cycle_fenetre_elargie_recoit_tout():
+    assert catch_rate(56.0, 59.5) == 1.0
