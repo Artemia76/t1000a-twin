@@ -49,6 +49,7 @@ SPIN_SKIP = 64_000                              # saut maximal par tour accélé
 POLL_MIN = 16                                   # lectures d'horloge consécutives avant d'accélérer une attente
 POLL_FRAC = 16                                  # saut ≤ durée de l'attente / POLL_FRAC (retard ≤ ≈ 6 %)
 POLL_SKIP = 256_000                             # saut maximal par lecture d'horloge (4 ms)
+CONSUMERS = ('_ZN10GR551xUart4readEv',)          # GR551xUart::read() (cœur Arduino de platform-gr551x)
 
 PASS = object()
 _U32 = struct.Struct('<I')                                 # un crochet qui renvoie PASS laisse s'exécuter la fonction réelle
@@ -615,10 +616,12 @@ class Twin:
         self.on('hal_nvic_system_reset', self._sw_reset)
         self.on('pwr_mgmt_mode_set', self._pwr_mode_set)
         self.on('pwr_mgmt_schedule', self._pwr_schedule)
-        self._probes = (self._clock_poll, self._wait_start)
+        self._probes = (self._clock_poll, self._wait_start, self._consume)
         self.on('gr551x_ticks32k', self._clock_poll)     # millis(), micros(), delay() du cœur Arduino
         for name in ('delay', 'delayMicroseconds'):       # début d'une attente : la série repart de zéro
             self.on(name, self._wait_start)
+        for name in CONSUMERS:                            # lecture de données reçues : du travail, pas une attente
+            self.on(name, self._consume)
         self.on_rom('hal_flash_sector_size', lambda: SECTOR)
         self.on_rom('hal_flash_get_info', self._rom_flash_info)
         try:
@@ -662,6 +665,13 @@ class Twin:
                 self._yield = True
                 self.uc.emu_stop()
         return None
+
+    def _consume(self):
+        """Lecture d'un octet reçu (tampon circulaire en RAM, sans appel de modèle) : la boucle qui dépile un flux
+        en relisant millis() à chaque octet travaille, elle n'attend pas. Sans cela, l'accélérateur sauterait
+        jusqu'à la livraison suivante à chaque morceau et la boucle ne viderait jamais le tampon (NMEA du GNSS
+        avec GSV : ≈ 500 octets/s)."""
+        self._model_calls += 1
 
     def _wait_start(self):
         """Entrée d'une fonction d'attente : la durée déjà attendue repart de zéro (deux attentes successives
