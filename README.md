@@ -10,10 +10,11 @@ Dépôt autonome, monté en sous-module `emulator/twin` du dépôt racine
 construits (voir `twin/paths.py` ; hors de T1000A : `T1000_ROOT=…` ou `GR551X_SDK=…`).
 
 ```
-pip install -r requirements.txt                      # unicorn, pyelftools, pytest
-python -m pytest tests -q                            # suite complète (≈ 6 min)
+pip install -r requirements.txt                      # unicorn, pyelftools, pytest, pytest-xdist
+python -m pytest tests -q -n auto --dist loadfile    # suite complète en parallèle (≈ 30 s ; ≈ 2 min sur un cœur)
 python -m pytest tests -q --firmware X.elf           # un seul firmware (ce que fait le garde-fou)
-python -m pytest tests -q --endurance-h 24           # endurance de 24 h virtuelles (≈ 5 min de plus)
+python -m pytest tests -q --endurance-h 24           # endurance de 24 h virtuelles
+TWIN_TURBO=0 python -m pytest tests -q -n auto       # sans accélération (exécution brute, pour comparer)
 python run_twin.py firmware.elf -n 2                 # jumeaux en temps réel, joignables en TCP
 meshcore-cli -t 127.0.0.1 -p 5000 infos              # le vrai client MeshCore sur le jumeau
 nc 127.0.0.1 5100                                    # console BLE de secours du nœud 0
@@ -24,7 +25,7 @@ nc 127.0.0.1 5100                                    # console BLE de secours du
 | Composant | Modèle (`twin/`) | Fidélité |
 |---|---|---|
 | CPU Cortex-M4, RAM, Flash XIP | `core.py` (Unicorn) | Code machine réel. Flash NOR (écriture = ET, effacement par 4 Ko). Mémoire d'échange BLE |
-| Temps | `core.py` | Horloge unique à 64 MHz pour DWT, SysTick, minuteur AON et calendrier. Veille qui saute au prochain événement |
+| Temps | `core.py` | Horloge unique à 64 MHz pour DWT, SysTick, minuteur AON et calendrier. Veille qui saute au prochain événement. Attentes actives accélérées (voir plus bas) |
 | Interruptions | `core.py` | Rappels injectés entre deux instructions quelconques, si PRIMASK le permet, sur une pile d'interruption. `seed` fait varier les points d'injection |
 | GPIO / AON / MSIO | `periph.py` `Gpio` | Niveaux, tirages, fronts et niveaux d'IRQ, composants qui imposent des niveaux |
 | app_timer, UART, SPI, ADC, PWM | `periph.py` | Au niveau des pilotes `app_*` du SDK. UART au débit réel, morceaux livrés en interruption |
@@ -46,6 +47,8 @@ sans aucun décalage codé en dur.
   3ᵉ démarrage court, bouton maintenu 6 s, garde effacée après 2 min ou à la connexion, chien de garde de 8 s,
   écritures Flash bornées. Deux mutations sont aussi testées : un firmware bloqué dans `loop()` et un LR1110
   muet doivent finir **en DFU d'eux-mêmes**, jamais en brique.
+* `test_twin_core.py` vérifie le cœur du jumeau : durée des attentes accélérées, événement servi à l'heure
+  pendant une attente.
 * `test_console.py` vérifie la console BLE de secours : `info`, `dfu`, `reboot`, deux lignes reçues d'affilée.
 * `test_meshcore.py` couvre le compagnon :
   * radio (aucune commande inconnue, BUSY respecté, réception continue) ;
@@ -83,12 +86,18 @@ jumeau hors du dépôt.
 * Aucun comportement électrique ni radiofréquence, pas de consommation. 1 instruction ≈ 1 cycle.
 * Le LR1110 n'implémente que la partie LoRa utilisée par RadioLib. GNSS et Wi-Fi internes ne sont pas
   modélisés. Les commandes inconnues sont relevées (`unknown_cmds`).
-* **Accélérations** (désactivables par `T1000A(..., turbo=False)`) :
+* **Accélérations** (désactivables par `T1000A(..., turbo=False)` ou `TWIN_TURBO=0`) :
   * une boucle principale qui tourne à vide 8 fois de suite sans appeler aucun modèle fait sauter le temps
     au prochain événement (1 ms au plus) ;
+  * une attente active (`delay()`, `delayMicroseconds()`, `delay_ms` du SDK, toute boucle sur `millis()`)
+    qui relit l'horloge 16 fois sans appeler aucun modèle fait sauter le temps à chaque lecture, d'au plus
+    1/16 de la durée déjà attendue (4 ms au plus). Une attente finit donc au plus ≈ 6 % trop tard ;
+  * une lecture de broche qui renvoie la même valeur que la précédente ne compte pas comme activité : une
+    boucle qui attend le relâchement du bouton reste une attente ;
   * une instruction `b .` saute directement au prochain événement.
 
-  Les échéances restent exactes, seul le nombre de tours de boucle change.
+  Les échéances restent exactes, car aucun saut ne dépasse le prochain événement. Seul le nombre de tours de
+  boucle change.
 
 ## Ajouter un modèle
 

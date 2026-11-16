@@ -2,3 +2,4 @@
 unicorn>=2.1
 pyelftools>=0.31
 pytest>=8
+pytest-xdist>=3      # tests en parallèle (-n auto)
