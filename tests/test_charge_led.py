@@ -129,7 +129,7 @@ def test_buzzer_pendant_la_respiration(node):
     con = node.con
     plug(node)
     node.run(1500)
-    assert 'beep 2000 Hz' in con.send('beep')
+    assert 'beep 2000 Hz' in con.send('beep', wait_ms=100)    # son de 500 ms : vérifié pendant qu'il sonne
     assert node.pwm.running.get(BUZZER_PWM) == 2000, 'le buzzer (PWM0) sonne'
     assert node.pwm.duty.get(LED_PWM) is not None, 'la LED (PWM1) continue de respirer'
 
