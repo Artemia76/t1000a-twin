@@ -6,7 +6,7 @@ BLE connecté ou en annonce, émission LoRa, GNSS) et en garde un échantillon t
 import re
 import pytest
 from conftest import MAGIC, preset
-from test_console import Console
+from helpers import Console
 from twin import T1000A
 
 LOG_HEADER = '# t_s,dt_s,bat_mv,idle_pm,wakes,conn_s,adv_s,gps_s,tx_ms,rx,tx,flags,msio0_mv'
@@ -79,7 +79,7 @@ def test_chg(console):
 
 def test_temps_d_emission_lora(meshcore_debug_elf):
     from twin.companion import Companion
-    from test_console import GUS_TX
+    from helpers import GUS_TX
     n = T1000A(meshcore_debug_elf, flash=preset(guard=MAGIC + b'\x00'))
     n.run(4000)
     comp = Companion(n).start()                     # connexion du téléphone (appairage) …

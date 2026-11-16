@@ -12,12 +12,11 @@ import re
 import struct
 import pytest
 from conftest import MAGIC, preset, symbols
-from test_console import Console
+from helpers import Console, NOW
 from twin import T1000A, World, time_on_air_us
 from twin.companion import Companion, decode
 from twin.lr1110 import BW_KHZ
 
-NOW = 1794571200
 
 
 @pytest.fixture(scope='module', autouse=True)

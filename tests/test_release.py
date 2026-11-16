@@ -5,11 +5,10 @@ compagnon. La release se met à jour par le maintien du bouton 6 s (DFU).
 """
 import pytest
 from conftest import MAGIC, preset, has_console
-from test_console import GUS_TX
+from helpers import GUS_TX, CABLE, CHG_STAT, LED_PWM  # noqa: F401
 from twin import T1000A
 from twin.companion import Companion
 
-CABLE, CHG_STAT, LED_PWM = 0, 0x24, 1
 
 
 @pytest.fixture

@@ -10,7 +10,7 @@ from twin import T1000A, World, time_on_air_us
 from twin.companion import Companion, decode, NUS_RX
 from twin.lr1110 import BW_KHZ, MODE_RX, IRQ_RX_DONE
 
-NOW = 1794571200        # 13/11/2026 12:00 UTC
+from helpers import NOW
 
 
 def self_info(c):

@@ -8,11 +8,13 @@ est celle pour laquelle le SDK est compilé.
 
 Usage : rom_check.py <firmware_seeed.bin>
 """
-import re, struct, sys, capstone
+import os, re, struct, sys, capstone
 from collections import Counter
 from capstone import arm
 
-from twin.paths import rom_syms
+_here = os.path.dirname(os.path.abspath(__file__))
+sys.path[:0] = [_here, os.path.dirname(_here)]   # la racine du jumeau (twin)
+from twin.paths import rom_syms  # noqa: E402
 if len(sys.argv) < 2:
     sys.exit('usage : rom_check.py <firmware Seeed .bin>')
 FW = sys.argv[1]

@@ -11,7 +11,7 @@ import pytest
 from twin import T1000A
 from twin.companion import Companion
 
-NOW = 1794571200
+from helpers import NOW
 MIN = 60_000
 CLI, CLI_REPLY = 66, 29
 

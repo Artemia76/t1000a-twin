@@ -11,14 +11,18 @@ construits (voir `twin/paths.py` ; hors de T1000A : `T1000_ROOT=…` ou `GR551X_
 
 ```
 pip install -r requirements.txt                      # unicorn, pyelftools, pytest, pytest-xdist
-python -m pytest tests -q -n auto --dist loadfile    # suite complète en parallèle (≈ 30 s ; ≈ 2 min sur un cœur)
-python -m pytest tests -q --firmware X.elf           # un seul firmware (ce que fait le garde-fou)
-python -m pytest tests -q --endurance-h 24           # endurance de 24 h virtuelles
-TWIN_TURBO=0 python -m pytest tests -q -n auto       # sans accélération (exécution brute, pour comparer)
+python -m pytest -q -n auto --dist loadfile          # suite complète en parallèle (≈ 30 s ; ≈ 2 min sur un cœur)
+python -m pytest -q --firmware=X.elf                 # un seul firmware (ce que fait le garde-fou)
+python -m pytest -q --endurance-h 24                 # endurance de 24 h virtuelles
+TWIN_TURBO=0 python -m pytest -q -n auto             # sans accélération (exécution brute, ≈ 30 min)
 python run_twin.py firmware.elf -n 2                 # jumeaux en temps réel, joignables en TCP
 meshcore-cli -t 127.0.0.1 -p 5000 infos              # le vrai client MeshCore sur le jumeau
 nc 127.0.0.1 5100                                    # console BLE de secours du nœud 0
 ```
+
+`pytest.ini` limite la collecte à `tests/`. Pour passer un ELF, écrire `--meshcore=chemin` (ou ajouter `tests`
+à la ligne de commande) : un chemin isolé hors du dépôt ferait choisir à pytest une autre racine, sans
+`pytest.ini`.
 
 ## Ce qui est modélisé
 
@@ -31,7 +35,7 @@ nc 127.0.0.1 5100                                    # console BLE de secours du
 | app_timer, UART, SPI, ADC, PWM | `periph.py` | Au niveau des pilotes `app_*` du SDK. UART au débit réel, morceaux livrés en interruption |
 | Chien de garde AON | `periph.py` `Watchdog` | Redémarre vraiment le MCU s'il n'est pas rafraîchi |
 | LR1110 | `lr1110.py` | Fidèle au manuel utilisateur LR1110 Rev 2.3 et aux mesures faites sur le boîtier (sonde `lr`, 2026-11-16, firmware 03.07) : chaque comportement a sa source dans l'en-tête du fichier. Protocole SPI (Stat1/Stat2/IRQ, réponse en 2ᵉ transaction, CMD_PERR / CMD_FAIL), commande perdue si BUSY est haut ou si elle réveille la puce, durées de BUSY mesurées (TCXO 5 ms, calibrations), sommeil chaud (640 µs) et froid (13,3 ms, contexte perdu), mode de repli, écoute cyclique (fenêtre / sommeil + 5,2 ms, arrêt sur RX_DONE ou NSS). Temps d'antenne exact, DIO inversée vers AON1, RNG, bruit propre à chaque radio |
-| AG3335 (GNSS) | `ag3335.py` | NMEA RMC/GGA/GSA chaque seconde, seulement si GPS_EN et RESET sont hauts. Sans fix, avec fix ou trajet. Acquitte les `$PAIR` |
+| AG3335 (GNSS) | `ag3335.py` | NMEA RMC/GGA/GSA chaque seconde, GSV si demandé (`$PAIR062`), seulement si GPS_EN et RESET sont hauts. Sans fix, avec fix, trajet, ciel faible ou sans ciel. Acquitte les `$PAIR` |
 | Pile BLE (ROM) | `ble.py` `BleStack` | API `ble_gap/gatts/sec` : base GATT construite depuis les tables du firmware, permissions (ATT 0x05 sans appairage), appairage par code, liaisons persistantes à travers les redémarrages, files de notifications limitées |
 | Téléphone | `ble.py` `Phone`, `companion.py` | Central qui se connecte, s'appaire, écrit et s'abonne. Client du protocole compagnon MeshCore |
 | Éther LoRa | `world.py` | Plusieurs jumeaux avancent en pas d'1 ms. RSSI/SNR par lien, pertes, collisions sans effet de capture, injection de paquets |
@@ -60,6 +64,15 @@ sans aucun décalage codé en dur.
   * veille ;
   * endurance ;
   * réseau à deux nœuds (contacts, message + ACK), persistance après redémarrage, collision.
+* `test_release.py` : le firmware release, sans console, fait la même chose que la debug.
+* `test_power.py` : journal d'énergie de la console (`power`, `power log`, `power reset`, `chg`).
+* `test_power_off.py` : arrêt véritable (veille ultra-profonde), réveil par le bouton ou le début de charge.
+* `test_charge_led.py` : LED de charge (respiration, chargé, activité en négatif, clignotement sur batterie).
+* `test_rx_duty.py` : réception LoRa en cycle veille/écoute, aucun accès SPI pendant le sommeil de la radio.
+* `test_gnss.py` : GNSS périodique, arrêt rapide sans satellite capté et essais espacés.
+
+`tests/helpers.py` regroupe les aides partagées : console BLE (`Console`), câble de charge (`plug`/`unplug`),
+heure de référence `NOW`.
 
 ## Garde-fou avant flash
 
@@ -109,11 +122,12 @@ automatique. Le modèle programme ses échéances par `tw.schedule(cycles, fn)` 
 firmware par `tw.irq(nom, adresse, args, blobs)`. Son état est remis à zéro au reset par
 `tw.reset_listeners`.
 
-## Ancien simulateur
+## Ancien simulateur (`legacy/`)
 
-`gr5515_sim.py`, `test_hello.py` et `test_arduino.py` restent en place, et leurs 45 + 34 vérifications sont
-toujours vertes. Ils valident le firmware de test `hello`, désormais figé. `rom_check.py` compare les appels
-ROM du firmware Seeed à notre table de symboles.
+`gr5515_sim.py`, `check_hello.py` et `check_arduino.py` précèdent le jumeau et se lancent directement, hors
+pytest (`python legacy/check_hello.py [hello.elf]`, `python legacy/check_arduino.py blink.elf --console`). Leurs
+45 + 34 vérifications sont toujours vertes. Ils valident le firmware de test `hello`, désormais figé.
+`rom_check.py` compare les appels ROM du firmware Seeed à notre table de symboles.
 
 ## Licence
 

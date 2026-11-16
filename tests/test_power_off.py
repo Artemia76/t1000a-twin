@@ -11,21 +11,10 @@
 import re
 import pytest
 from conftest import MAGIC, preset, GUARD
-from test_console import Console
+from helpers import Console, CABLE, CHG_STAT, LED_PWM, plug, unplug  # noqa: F401
 from twin import T1000A
 
-CABLE, CHG_STAT, LED_PWM = 0, 0x24, 1
 OFF_REC = GUARD + 0x800
-
-
-def unplug(n):
-    n.adc.sources[CABLE] = lambda: 35
-    n.gpio.drive(CHG_STAT, 1)
-
-
-def plug(n, charging=True):
-    n.adc.sources[CABLE] = lambda: 2490
-    n.gpio.drive(CHG_STAT, 0 if charging else 1)
 
 
 def power_off(meshcore_elf):

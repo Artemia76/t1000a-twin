@@ -6,34 +6,7 @@ reçues d'affilée (aucune perdue).
 import pytest
 from conftest import GUARD, DFU_FLAG, MAGIC, preset, require_console
 from twin import T1000A
-
-_BASE = [0x1B, 0xD7, 0x90, 0xEC, 0xE8, 0xB9, 0x75, 0x80, 0x0A, 0x46, 0x44, 0xD3]
-GUS_TX = bytes(_BASE + [0x02, 0x02, 0xED, 0xA6])        # notifications du T1000-A
-GUS_RX = bytes(_BASE + [0x03, 0x02, 0xED, 0xA6])        # écritures du téléphone
-
-
-class Console:
-    def __init__(self, node):
-        self.node, self.ph = node, node.phone
-        self.out = bytearray()
-        self.ph.on_notify.append(lambda u, d: self.out.extend(d) if u == GUS_TX else None)
-
-    def open(self):
-        n = self.node
-        n.run(3000)
-        assert n.ble.find(GUS_RX), 'service GUS absent de la base GATT'
-        self.ph.connect()
-        n.run(200)
-        assert self.ph.subscribe(GUS_TX) in (None, 0)
-        n.run(200)
-        return self
-
-    def send(self, line, wait_ms=500):
-        k = len(self.out)
-        err = self.ph.write(GUS_RX, line.encode() + b'\r\n')
-        assert err in (None, 0), f'écriture console refusée ({err:#x})'
-        self.node.run(wait_ms)
-        return self.out[k:].decode('utf-8', 'replace')
+from helpers import Console, GUS_TX, GUS_RX  # noqa: F401  (réexportés)
 
 
 @pytest.fixture

@@ -4,8 +4,9 @@
 Chaque scénario part d'une Flash simulée (bootloader non modélisé, zone appli = notre image),
 démarre le firmware et vérifie un comportement de sécurité. Code de sortie 0 si tout passe.
 """
-import struct, sys
-sys.path.insert(0, __file__.rsplit('/', 1)[0])
+import os, struct, sys
+_here = os.path.dirname(os.path.abspath(__file__))
+sys.path[:0] = [_here, os.path.dirname(_here)]   # legacy/ (gr5515_sim) et la racine du jumeau (twin)
 from gr5515_sim import GR5515Sim, Stop, Reset
 from twin.paths import in_root
 

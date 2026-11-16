@@ -5,10 +5,11 @@ Vérifie la séquence de démarrage du cœur et les sécurités de la variante T
 constructeurs C++, garde de démarrage, chien de garde, retour au DFU (bouton, console BLE),
 écritures Flash limitées aux zones prévues.
 
-Usage : test_arduino.py firmware.elf [--console]   (--console : le croquis utilise BleConsole)
+Usage : check_arduino.py firmware.elf [--console]   (--console : le croquis utilise BleConsole)
 """
-import re, struct, sys
-sys.path.insert(0, __file__.rsplit('/', 1)[0])
+import os, re, struct, sys
+_here = os.path.dirname(os.path.abspath(__file__))
+sys.path[:0] = [_here, os.path.dirname(_here)]   # legacy/ (gr5515_sim) et la racine du jumeau (twin)
 from gr5515_sim import GR5515Sim, Stop, Reset
 
 ELF = sys.argv[1]

@@ -10,22 +10,10 @@ Câble de charge : MSIO0 ≈ 2,5 V branché, ≈ 35 mV débranché. Chargeur : A
 import re
 import pytest
 from conftest import MAGIC, preset
-from test_console import Console
+from helpers import Console, CABLE, CHG_STAT, LED_PWM, plug, unplug  # noqa: F401
 from twin import T1000A
 
-LED_PWM = 1                 # PWM1 (AON3 = PWM1_A)
 BUZZER_PWM = 0
-CABLE, CHG_STAT = 0, 0x24   # MSIO0, AON4
-
-
-def plug(node, charging=True):
-    node.adc.sources[CABLE] = lambda: 2490
-    node.gpio.drive(CHG_STAT, 0 if charging else 1)
-
-
-def unplug(node):
-    node.adc.sources[CABLE] = lambda: 35
-    node.gpio.drive(CHG_STAT, 1)
 
 
 def sample(node, ms, step=10):
