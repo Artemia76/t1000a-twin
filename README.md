@@ -30,7 +30,7 @@ nc 127.0.0.1 5100                                    # console BLE de secours du
 | GPIO / AON / MSIO | `periph.py` `Gpio` | Niveaux, tirages, fronts et niveaux d'IRQ, composants qui imposent des niveaux |
 | app_timer, UART, SPI, ADC, PWM | `periph.py` | Au niveau des pilotes `app_*` du SDK. UART au débit réel, morceaux livrés en interruption |
 | Chien de garde AON | `periph.py` `Watchdog` | Redémarre vraiment le MCU s'il n'est pas rafraîchi |
-| LR1110 | `lr1110.py` | Protocole SPI de la fiche technique : Stat1/Stat2/IRQ, réponse lue dans la transaction suivante, BUSY, réveil par NSS. États radio, tampons, temps d'antenne exact, DIO inversée vers AON1, RNG, bruit propre à chaque radio. Toute commande inconnue est relevée |
+| LR1110 | `lr1110.py` | Fidèle au manuel utilisateur LR1110 Rev 2.3 et aux mesures faites sur le boîtier (sonde `lr`, 2026-11-16, firmware 03.07) : chaque comportement a sa source dans l'en-tête du fichier. Protocole SPI (Stat1/Stat2/IRQ, réponse en 2ᵉ transaction, CMD_PERR / CMD_FAIL), commande perdue si BUSY est haut ou si elle réveille la puce, durées de BUSY mesurées (TCXO 5 ms, calibrations), sommeil chaud (640 µs) et froid (13,3 ms, contexte perdu), mode de repli, écoute cyclique (fenêtre / sommeil + 5,2 ms, arrêt sur RX_DONE ou NSS). Temps d'antenne exact, DIO inversée vers AON1, RNG, bruit propre à chaque radio |
 | AG3335 (GNSS) | `ag3335.py` | NMEA RMC/GGA/GSA chaque seconde, seulement si GPS_EN et RESET sont hauts. Sans fix, avec fix ou trajet. Acquitte les `$PAIR` |
 | Pile BLE (ROM) | `ble.py` `BleStack` | API `ble_gap/gatts/sec` : base GATT construite depuis les tables du firmware, permissions (ATT 0x05 sans appairage), appairage par code, liaisons persistantes à travers les redémarrages, files de notifications limitées |
 | Téléphone | `ble.py` `Phone`, `companion.py` | Central qui se connecte, s'appaire, écrit et s'abonne. Client du protocole compagnon MeshCore |
@@ -49,6 +49,8 @@ sans aucun décalage codé en dur.
   muet doivent finir **en DFU d'eux-mêmes**, jamais en brique.
 * `test_twin_core.py` vérifie le cœur du jumeau : durée des attentes accélérées, événement servi à l'heure
   pendant une attente.
+* `test_lr1110.py` vérifie le modèle LR1110 seul, au niveau SPI et sans firmware : une mesure ou une règle du
+  manuel par test (≈ 0,1 s).
 * `test_console.py` vérifie la console BLE de secours : `info`, `dfu`, `reboot`, deux lignes reçues d'affilée.
 * `test_meshcore.py` couvre le compagnon :
   * radio (aucune commande inconnue, BUSY respecté, réception continue) ;
