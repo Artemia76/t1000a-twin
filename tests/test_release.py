@@ -35,8 +35,8 @@ def test_demarre_compagnon_et_pas_de_service_gus(node):
 
 def test_clignotement_de_vie(node):
     led = []
-    for _ in range(80):
-        node.run(100)
+    for _ in range(800):                 # pas de 10 ms : le flash dure 20 ms
+        node.run(10)
         led.append(node.led())
     assert 0 < sum(led) < len(led), 'clignotement de vie'
 

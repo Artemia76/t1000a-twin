@@ -70,8 +70,9 @@ def test_sur_batterie_clignotement_sans_pwm(node):
     s = sample(node, 8000)
     assert all(d is None for d, _ in s), 'pas de PWM sur batterie'
     on = sum(1 for _, led in s if led)
-    # le flash de 20 ms dure jusqu'au réveil suivant du CPU (au plus 1 s, timer du cœur) : comportement existant
-    assert 0 < on <= len(s) * 0.3, f'clignotement de vie attendu ({on}/{len(s)} échantillons allumés)'
+    # le flash dure 20 ms : le CPU est réveillé pour l'éteindre (STATUS_LED_WAKE), sinon il durerait jusqu'au
+    # réveil suivant (au plus 1 s)
+    assert 0 < on <= len(s) * 0.02, f'clignotement de vie attendu ({on}/{len(s)} échantillons allumés)'
 
 
 def test_respiration_en_charge(node):
