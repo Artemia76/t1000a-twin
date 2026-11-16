@@ -1,11 +1,13 @@
 """Configuration pytest du jumeau numérique T1000-A.
 
 Firmwares testés (chemins par défaut, ou options) :
-  --meshcore  ELF du compagnon MeshCore BLE (firmware/meshcore/.pio/build/t1000a_companion_radio_ble/firmware.elf)
+  --meshcore  ELF du compagnon MeshCore BLE, firmware debug (…/t1000a_companion_radio_ble_debug/firmware.elf)
+  --meshcore-release  ELF release, sans console (…/t1000a_companion_radio_ble/firmware.elf)
   --blink     ELF de l'exemple platform-gr551x (BleConsole)
   --firmware  un seul ELF à valider (garde-fou avant flash) : les tests génériques s'appliquent à lui, les tests
               MeshCore seulement s'il s'agit d'un firmware MeshCore.
-Un test dont le firmware est absent est sauté (pas d'échec).
+Un test dont le firmware est absent est sauté (pas d'échec). Les tests qui passent par la console BLE sont sautés
+sur un firmware sans console (release).
 """
 import os, sys
 import pytest
@@ -15,7 +17,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..')))
 from twin.paths import ROOT  # dépôt T1000A (voir twin/paths.py)
 
 DEFAULTS = {
-    'meshcore': f'{ROOT}/firmware/meshcore/.pio/build/t1000a_companion_radio_ble/firmware.elf',
+    # debug : console BLE et journal d'énergie (couverture complète) ; release : sans console (test_release.py)
+    'meshcore': f'{ROOT}/firmware/meshcore/.pio/build/t1000a_companion_radio_ble_debug/firmware.elf',
+    'meshcore_release': f'{ROOT}/firmware/meshcore/.pio/build/t1000a_companion_radio_ble/firmware.elf',
     'blink': f'{ROOT}/platform/gr551x/examples/blink/.pio/build/t1000-a/firmware.elf',
 }
 
@@ -28,15 +32,35 @@ MAGIC = b'T1GD'
 
 def pytest_addoption(parser):
     for k, v in DEFAULTS.items():
-        parser.addoption(f'--{k}', default=v, help=f'ELF {k} (défaut : {v})')
+        parser.addoption(f'--{k.replace("_", "-")}', dest=k, default=v, help=f'ELF {k} (défaut : {v})')
     parser.addoption('--firmware', default=None, help='valider uniquement cet ELF (garde-fou avant flash)')
     parser.addoption('--endurance-h', type=float, default=1.0, help="durée virtuelle du test d'endurance (h)")
 
 
+_symbols = {}
+
+
+def symbols(path):
+    if path not in _symbols:
+        from elftools.elf.elffile import ELFFile
+        st = ELFFile(open(path, 'rb')).get_section_by_name('.symtab')
+        _symbols[path] = {s.name for s in st.iter_symbols()}
+    return _symbols[path]
+
+
 def is_meshcore(path):
-    from elftools.elf.elffile import ELFFile
-    st = ELFFile(open(path, 'rb')).get_section_by_name('.symtab')
-    return any('MyMesh' in s.name for s in st.iter_symbols())
+    return any('MyMesh' in n for n in symbols(path))
+
+
+def has_console(path):
+    """Console BLE (service GUS) présente : firmware debug, ou exemple blink."""
+    return any('BleConsole' in n for n in symbols(path))
+
+
+def require_console(path):
+    if not has_console(path):
+        pytest.skip('firmware sans console BLE (release) : test réservé au firmware debug')
+    return path
 
 
 def elf_path(config, kind):
@@ -44,8 +68,10 @@ def elf_path(config, kind):
     if fw:
         if not os.path.exists(fw):
             pytest.fail(f'firmware introuvable : {fw}')
-        if kind == 'meshcore' and not is_meshcore(fw):
+        if kind in ('meshcore', 'meshcore_release') and not is_meshcore(fw):
             pytest.skip('tests MeshCore : le firmware validé n\'est pas MeshCore')
+        if kind == 'meshcore_release' and has_console(fw):
+            pytest.skip('tests de la release : le firmware validé est une debug')
         if kind == 'blink':
             pytest.skip('--firmware : seul ce firmware est validé')
         return fw
@@ -58,6 +84,17 @@ def elf_path(config, kind):
 @pytest.fixture(scope='session')
 def meshcore_elf(pytestconfig):
     return elf_path(pytestconfig, 'meshcore')
+
+
+@pytest.fixture(scope='session')
+def meshcore_debug_elf(pytestconfig):
+    """Compagnon MeshCore avec console BLE (firmware debug) ; sauté sur une release."""
+    return require_console(elf_path(pytestconfig, 'meshcore'))
+
+
+@pytest.fixture(scope='session')
+def meshcore_release_elf(pytestconfig):
+    return elf_path(pytestconfig, 'meshcore_release')
 
 
 @pytest.fixture(scope='session')

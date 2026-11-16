@@ -4,7 +4,7 @@ Commandes vérifiées : info, dfu (retour au bootloader Seeed), reboot, commande
 reçues d'affilée (aucune perdue).
 """
 import pytest
-from conftest import GUARD, DFU_FLAG, MAGIC, preset
+from conftest import GUARD, DFU_FLAG, MAGIC, preset, require_console
 from twin import T1000A
 
 _BASE = [0x1B, 0xD7, 0x90, 0xEC, 0xE8, 0xB9, 0x75, 0x80, 0x0A, 0x46, 0x44, 0xD3]
@@ -38,6 +38,7 @@ class Console:
 
 @pytest.fixture
 def console(any_elf):
+    require_console(any_elf)
     n = T1000A(any_elf, flash=preset(guard=MAGIC + b'\x00'))
     n.tw.trace('app_aon_wdt_deinit')
     return Console(n).open()

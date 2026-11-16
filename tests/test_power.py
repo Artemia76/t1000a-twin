@@ -13,8 +13,8 @@ LOG_HEADER = '# t_s,dt_s,bat_mv,idle_pm,wakes,conn_s,adv_s,gps_s,tx_ms,rx,tx,fla
 
 
 @pytest.fixture
-def console(meshcore_elf):
-    return Console(T1000A(meshcore_elf, flash=preset(guard=MAGIC + b'\x00'))).open()
+def console(meshcore_debug_elf):
+    return Console(T1000A(meshcore_debug_elf, flash=preset(guard=MAGIC + b'\x00'))).open()
 
 
 def summary(console):
@@ -77,10 +77,10 @@ def test_chg(console):
     assert re.search(r'chg: aon4=[01] aon5=[01] msio0=-?\d+ mV bat=\d+ mV', r), r
 
 
-def test_temps_d_emission_lora(meshcore_elf):
+def test_temps_d_emission_lora(meshcore_debug_elf):
     from twin.companion import Companion
     from test_console import GUS_TX
-    n = T1000A(meshcore_elf, flash=preset(guard=MAGIC + b'\x00'))
+    n = T1000A(meshcore_debug_elf, flash=preset(guard=MAGIC + b'\x00'))
     n.run(4000)
     comp = Companion(n).start()                     # connexion du téléphone (appairage) …
     con = Console(n)

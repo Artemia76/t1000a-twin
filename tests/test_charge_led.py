@@ -50,9 +50,9 @@ def dark_runs(duties):
 
 
 @pytest.fixture(scope='module')
-def board(meshcore_elf):
+def board(meshcore_debug_elf):
     """Un seul boîtier pour le module (le démarrage coûte ≈ 20 s), avec la console BLE ouverte."""
-    n = T1000A(meshcore_elf, flash=preset(guard=MAGIC + b'\x00'))
+    n = T1000A(meshcore_debug_elf, flash=preset(guard=MAGIC + b'\x00'))
     unplug(n)
     n.run(4000)
     n.con = Console(n).open()
@@ -134,13 +134,13 @@ def test_buzzer_pendant_la_respiration(node):
     assert node.pwm.duty.get(LED_PWM) is not None, 'la LED (PWM1) continue de respirer'
 
 
-def test_message_non_lu_extinction_longue(meshcore_elf):
+def test_message_non_lu_extinction_longue(meshcore_debug_elf):
     from twin import World
     from twin.companion import Companion
     import struct
     w = World()
-    a = w.add(T1000A(meshcore_elf, name='A', flash=preset(guard=MAGIC + b'\x00')))
-    b = w.add(T1000A(meshcore_elf, name='B'))
+    a = w.add(T1000A(meshcore_debug_elf, name='A', flash=preset(guard=MAGIC + b'\x00')))
+    b = w.add(T1000A(meshcore_debug_elf, name='B'))
     unplug(a)
     w.run(4000)
     cb = Companion(b).start()

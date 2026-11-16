@@ -63,8 +63,8 @@ def test_arret_puis_appuis_courts(meshcore_elf):
     assert n.tw.flash_bytes(OFF_REC, 6)[4:] == (3900).to_bytes(2, 'little'), 'tension du premier arrêt conservée'
 
 
-def test_appui_long_rallume(meshcore_elf):
-    n = power_off(meshcore_elf)
+def test_appui_long_rallume(meshcore_debug_elf):
+    n = power_off(meshcore_debug_elf)
     for _ in range(2):
         n.press(100)
         n.run(2000)
