@@ -45,6 +45,8 @@ COST_CALL = 60                                  # cycles comptés pour un pilote
 COST_CLOCK = 16                                 # cycles comptés par lecture d'horloge
 COST_IRQ = 120                                  # entrée + sortie d'interruption
 QUIET_LOOPS = 8                                 # tours de boucle « à vide » avant d'accélérer
+RADIO_QUIET = 2                                 # réveils radio « à vide » de suite avant de sauter les suivants
+RADIO_PASS_IGNORE = {'app_aon_wdt_refresh', 'pwr_mgmt_mode_set', 'pwr_mgmt_schedule'}   # à chaque tour : pas une activité
 SPIN_SKIP = 64_000                              # saut maximal par tour accéléré (1 ms)
 POLL_MIN = 16                                   # lectures d'horloge consécutives avant d'accélérer une attente
 POLL_FRAC = 16                                  # saut ≤ durée de l'attente / POLL_FRAC (retard ≤ ≈ 6 %)
@@ -144,6 +146,17 @@ class Twin:
         self.aon_reload, self.aon_t0 = 0xFFFFFFFF, 0
         self.uc, self._running, self._hooked, self._skip_bp = None, False, set(), None
         self.asleep, self.sleeps, self.slept = False, 0, 0
+        # Réveils « radio » : la ROM sort de pwr_mgmt_schedule() à chaque événement du contrôleur BLE (annonce,
+        # événement de connexion), sans interruption pour l'application (mesuré sur le boîtier le 17/11/2026,
+        # firmware de sonde « sched »). TWIN_BLE_WAKES : « turbo » (défaut : les réveils dont le tour de boucle
+        # ne fait rien sont sautés, voir RADIO_QUIET), « all » (tous, fidèle aux statistiques de veille du
+        # boîtier, plus lent), « off » (aucun, comportement d'avant le 17/11/2026).
+        self.radio_wakes = os.environ.get('TWIN_BLE_WAKES', 'turbo')
+        self._radio_wake, self.radio_wake_count = False, 0
+        # Turbo : après RADIO_QUIET réveils radio dont le tour de boucle n'a appelé aucun modèle, les suivants
+        # sont sautés jusqu'au prochain réveil par une vraie interruption (le tour aurait été identique).
+        self._rw_pass, self._rw_calls, self._rw_quiet, self.radio_wake_skipped = False, 0, 0, 0
+        self._act_calls = 0                     # appels de modèles hors RADIO_PASS_IGNORE
         # Accélération des boucles d'attente actives : voir _pwr_schedule
         self.turbo = turbo if turbo is not None else os.environ.get('TWIN_TURBO', '1') != '0'   # TWIN_TURBO=0 : exécution brute
         self._model_calls = self._calls_at_sched = 0
@@ -276,6 +289,15 @@ class Twin:
 
     def schedule_ms(self, delay_ms, fn, *args):
         return self.schedule(ms(delay_ms), fn, *args)
+
+    def radio_wake(self):
+        """Événement du contrôleur BLE : réveille le cœur s'il dort dans pwr_mgmt_schedule(), sans rien
+        signaler à l'application (la boucle refait un tour, puis se rendort)."""
+        if self.radio_wakes != 'off' and self.asleep:
+            if self.radio_wakes == 'turbo' and self.turbo and self._rw_quiet >= RADIO_QUIET:
+                self.radio_wake_skipped += 1
+                return
+            self._radio_wake = True
 
     @staticmethod
     def cancel(ev):
@@ -518,8 +540,11 @@ class Twin:
                 if self._pure_last.get(key, PASS) != ret:
                     self._pure_last[key] = ret
                     self._model_calls += 1
-            elif fn != self._pwr_schedule:
+                    self._act_calls += 1
+            elif fn != self._pwr_schedule and fn != self._pwr_mode_set:
                 self._model_calls += 1
+                if name not in RADIO_PASS_IGNORE:
+                    self._act_calls += 1
             if ret is not PASS:
                 self._return(ret)
 
@@ -528,6 +553,8 @@ class Twin:
         self.rom_calls[name] = self.rom_calls.get(name, 0) + 1
         h = self.rom_handlers.get(name)
         self._model_calls += 1
+        if name not in RADIO_PASS_IGNORE:
+            self._act_calls += 1
         self.cycles_add(COST_CALL)
         if h:
             fn, n = h
@@ -672,6 +699,7 @@ class Twin:
         jusqu'à la livraison suivante à chaque morceau et la boucle ne viderait jamais le tampon (NMEA du GNSS
         avec GSV : ≈ 500 octets/s)."""
         self._model_calls += 1
+        self._act_calls += 1
 
     def _wait_start(self):
         """Entrée d'une fonction d'attente : la durée déjà attendue repart de zéro (deux attentes successives
@@ -765,6 +793,7 @@ class Twin:
         self.pwr_mode = 0
         self._cal = None
         self.asleep = False
+        self._radio_wake, self._rw_pass, self._rw_quiet = False, False, 0
         self._build_cpu()
         for f in self.reset_listeners:
             f()
@@ -845,6 +874,9 @@ class Twin:
                 if r == 'sleep':
                     self.asleep = True
                     self.sleeps += 1
+                    if self._rw_pass:           # fin d'un tour dû à un réveil radio : a-t-il fait quelque chose ?
+                        self._rw_quiet = self._rw_quiet + 1 if self._act_calls == self._rw_calls else 0
+                        self._rw_pass = False
             except Reset as e:
                 if reset == 'raise':
                     raise
@@ -854,7 +886,13 @@ class Twin:
         """Le cœur dort dans pwr_mgmt_schedule : le temps saute d'événement en événement jusqu'à ce qu'une
         interruption soit à servir (réveil) ou jusqu'à `end`. Renvoie True au réveil."""
         while True:
-            if self._pending:
+            if self._pending or self._radio_wake:
+                if self._radio_wake and not self._pending:
+                    self.radio_wake_count += 1
+                    self._rw_pass, self._rw_calls = True, self._act_calls
+                else:
+                    self._rw_pass, self._rw_quiet = False, 0
+                self._radio_wake = False
                 self._wake()
                 return True
             t = self._next_event()

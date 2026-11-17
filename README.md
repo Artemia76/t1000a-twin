@@ -98,7 +98,16 @@ jumeau hors du dépôt.
   par des modèles. Un bogue de la ROM, ou une mauvaise configuration qu'elle seule détecterait (horloge LF,
   alimentation, comme pour hello-0.1), n'est **pas** vu. Les réglages de démarrage restent à comparer au
   firmware Seeed.
-* Aucun comportement électrique ni radiofréquence, pas de consommation. 1 instruction ≈ 1 cycle.
+* Aucun comportement électrique ni radiofréquence, pas de consommation. 1 instruction ≈ 1 cycle : le code
+  s'exécute ≈ 6 fois plus vite que sur le boîtier (`loop()` du compagnon ≈ 27 µs contre ≈ 170 µs mesurées le
+  17/11/2026 ; sonde « sched cpu » pour en trouver la cause).
+* **Veille légère** : comme la ROM du GR5515, `pwr_mgmt_schedule()` sort de veille à chaque événement du
+  contrôleur BLE (annonce : intervalle `adv_intv_max` + 0–10 ms ; connexion : intervalle du téléphone), deux
+  fois par événement (début, fin 3 ms après), sans interruption pour l'application. Calé sur le boîtier
+  (sonde « sched », `tests/test_gr5515_sched.py`) : sans connexion ≈ 16 réveils/s, veille de 159 ms au plus.
+  `TWIN_BLE_WAKES` : `turbo` (défaut : après 2 réveils dont le tour de boucle n'appelle aucun modèle, les
+  suivants sont sautés jusqu'à la prochaine vraie interruption), `all` (tous, statistiques de veille
+  fidèles, plus lent), `off` (aucun).
 * Le LR1110 n'implémente que la partie LoRa utilisée par RadioLib. GNSS et Wi-Fi internes ne sont pas
   modélisés. Les commandes inconnues sont relevées (`unknown_cmds`).
 * **Accélérations** (désactivables par `T1000A(..., turbo=False)` ou `TWIN_TURBO=0`) :
