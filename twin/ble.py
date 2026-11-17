@@ -24,6 +24,10 @@ def uuid16(u):
     return struct.pack('<H', u)
 
 
+ADV_INTERVAL_DEFAULT_MS = 152.5     # intervalle d'annonce si ble_gap_adv_param_set() n'est pas lisible
+RADIO_EVENT_MS = 3                  # durée d'un événement radio BLE (2e réveil du cœur)
+
+
 class BleStack:
     def __init__(self, tw, mac=None):
         self.tw = tw
@@ -34,12 +38,13 @@ class BleStack:
         self.bonds = {}                     # adresse du téléphone -> {'cccd': {poignée: valeur}}
         self.next_handle = 0x0010
         self.phones = []
+        self._rng = r
         self._reset()
         tw.reset_listeners.append(self._on_mcu_reset)
         api = {
             'ble_stack_init': self._stack_init,
             'ble_gatts_prf_add': self._prf_add,
-            'ble_gap_adv_param_set': lambda idx, own, p: SUCCESS,
+            'ble_gap_adv_param_set': self._adv_param_set,
             'ble_gap_adv_data_set': self._adv_data_set,
             'ble_gap_adv_start': self._adv_start,
             'ble_gap_adv_stop': self._adv_stop,
@@ -71,6 +76,8 @@ class BleStack:
         self.next_handle = 0x0010
         self.adv_on = False
         self.adv_data, self.scan_rsp = b'', b''
+        self.adv_interval_ms = ADV_INTERVAL_DEFAULT_MS
+        self._radio_ev = None
         self.name = b''
         self.conn = None                    # dict(phone, encrypted, mtu, cccd, pending_ntf…)
         self.sec = None
@@ -157,12 +164,45 @@ class BleStack:
             self.adv_data = b
         return SUCCESS
 
+    def _adv_param_set(self, idx, own, p):
+        # Intervalle effectif mesuré sur le boîtier = adv_intv_max (+ advDelay 0–10 ms de la norme)
+        try:
+            L = self.tw.L
+            d = self.tw.read(p, L.size('ble_gap_adv_param_t'))
+            self.adv_interval_ms = L.get(d, 'ble_gap_adv_param_t', 'adv_intv_max') * 0.625
+        except Exception:
+            self.adv_interval_ms = ADV_INTERVAL_DEFAULT_MS
+        return SUCCESS
+
+    # ------------------------------------------------------------------ réveils du contrôleur BLE
+    # Chaque événement radio (annonce sur 3 canaux, ou événement de connexion) sort le cœur de veille deux
+    # fois : au début, puis à la fin (≈ RADIO_EVENT_MS plus tard). Mesuré le 17/11/2026 (sonde « sched ») :
+    # sans connexion ≈ 6 longues veilles/s (≈ 150 ms) + autant de courtes (< 10 ms) ; connecté, une veille par
+    # intervalle de connexion + une courte.
+    def _radio_schedule(self):
+        self.tw.cancel(self._radio_ev)
+        self._radio_ev = None
+        if self.conn is not None:
+            period = self.conn['interval_ms']
+        elif self.adv_on:
+            period = self.adv_interval_ms + self._rng.uniform(0, 10)      # advDelay
+        else:
+            return
+        self._radio_ev = self._later(period, self._radio_event)
+
+    def _radio_event(self):
+        self._radio_ev = None
+        self.tw.radio_wake()
+        self._later(RADIO_EVENT_MS, self.tw.radio_wake)
+        self._radio_schedule()
+
     def _adv_start(self, idx, ptime):
         if not self.ready:
             return 0x0009                                  # SDK_ERR_INVALID_STATE (pile pas prête)
         if self.conn:
             return 0x0009
         self.adv_on = True
+        self._radio_schedule()
         self.tw.log('ble_adv_start', name=self.adv_name())
         self._later(1, self._evt, self.E('BLE_GAPM_EVT_ADV_START'))
         return SUCCESS
@@ -170,6 +210,7 @@ class BleStack:
     def _adv_stop(self, idx):
         if self.adv_on:
             self.adv_on = False
+            self._radio_schedule()
             self._later(1, self._evt, self.E('BLE_GAPM_EVT_ADV_STOP'), 0,
                         {'evt.gapm_evt.params.adv_stop.reason': self.E('BLE_GAP_STOPPED_REASON_ON_USER')})
         return SUCCESS
@@ -187,6 +228,7 @@ class BleStack:
             return SDK_ERR_DISCONNECTED
         ph = self.conn['phone']
         self.conn = None
+        self._radio_schedule()
         self._later(5, self._evt, self.E('BLE_GAPC_EVT_DISCONNECTED'), 0,
                     {'evt.gapc_evt.index': 0, 'evt.gapc_evt.params.disconnected': 0x16})
         ph._link_lost('déconnecté par le T1000-A')
@@ -302,6 +344,7 @@ class BleStack:
         self.adv_on = False
         self.conn = {'phone': phone, 'encrypted': False, 'mtu': 23, 'cccd': {}, 'ntf_q': [], 'ntf_ev': None,
                      'interval_ms': phone.interval_ms, 'pending': {}}
+        self._radio_schedule()
         E = self.E
         self._evt(E('BLE_GAPM_EVT_ADV_STOP'), 0, {'evt.gapm_evt.params.adv_stop.reason': E('BLE_GAP_STOPPED_REASON_CONN_EST')})
         self._evt(E('BLE_GAPC_EVT_CONNECTED'), 0, {
@@ -324,6 +367,7 @@ class BleStack:
             return
         c, self.conn = self.conn, None
         self.tw.cancel(c['ntf_ev'])
+        self._radio_schedule()
         self._evt(self.E('BLE_GAPC_EVT_DISCONNECTED'), 0,
                   {'evt.gapc_evt.index': 0, 'evt.gapc_evt.params.disconnected': reason})
 

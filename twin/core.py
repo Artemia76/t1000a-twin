@@ -42,12 +42,21 @@ DFU_FLAG = 0x010E4000
 
 SLICE = 10_000                                  # instructions par tranche (≈ 156 µs)
 COST_CALL = 60                                  # cycles comptés pour un pilote remplacé par un modèle
-COST_CLOCK = 16                                 # cycles comptés par lecture d'horloge
+COST_CLOCK = 16                                 # cycles comptés par lecture d'horloge (DWT->CYCCNT, SysTick)
+# Mesuré sur le boîtier le 17/11/2026 (sonde « sched cpu », IRQ coupées) : gr551x_ticks32k() = 101 cycles pour
+# 27 instructions ; le reste (≈ 57 cycles) est l'accès au compteur du calendrier AON (sélection par
+# AON_PAD_CTL1, lecture de TIMER_VAL, sélection restaurée), domaine basse fréquence.
+COST_AON_CLOCK = 57
+# Cycles par instruction : SHA-256 de 1 Ko = 113 000 cycles sur le boîtier pour 68 909 instructions (1,64) ;
+# une boucle serrée en Flash coûte 1,5 à 2,5 selon son alignement (cache XIP). TWIN_CPI=1 : modèle d'avant.
+CPI = float(os.environ.get('TWIN_CPI', '1.64'))
 COST_IRQ = 120                                  # entrée + sortie d'interruption
 QUIET_LOOPS = 8                                 # tours de boucle « à vide » avant d'accélérer
+RADIO_QUIET = 2                                 # réveils radio « à vide » de suite avant de sauter les suivants
+RADIO_PASS_IGNORE = {'app_aon_wdt_refresh', 'pwr_mgmt_mode_set', 'pwr_mgmt_schedule'}   # à chaque tour : pas une activité
 SPIN_SKIP = 64_000                              # saut maximal par tour accéléré (1 ms)
 POLL_MIN = 16                                   # lectures d'horloge consécutives avant d'accélérer une attente
-POLL_FRAC = 16                                  # saut ≤ durée de l'attente / POLL_FRAC (retard ≤ ≈ 6 %)
+POLL_FRAC = 32                                   # saut ≤ durée de l'attente / POLL_FRAC (retard ≤ ≈ 3 % par saut)
 POLL_SKIP = 256_000                             # saut maximal par lecture d'horloge (4 ms)
 CONSUMERS = ('_ZN10GR551xUart4readEv',)          # GR551xUart::read() (cœur Arduino de platform-gr551x)
 
@@ -120,7 +129,7 @@ class Twin:
         self._heap, self._seq = [], 0
         self._pending = []                      # rappels firmware à injecter : (nom, adr, args, blobs)
         self._in_irq = False
-        self._slice_base, self._slice_extra = 0, 0
+        self._slice_base, self._slice_extra, self._slice_jump = 0, 0, 0
         self.log_list = []                      # (cycles, type, détails)
         self.rom_calls = {}
         self.calls = []                         # fonctions tracées (trace())
@@ -144,6 +153,17 @@ class Twin:
         self.aon_reload, self.aon_t0 = 0xFFFFFFFF, 0
         self.uc, self._running, self._hooked, self._skip_bp = None, False, set(), None
         self.asleep, self.sleeps, self.slept = False, 0, 0
+        # Réveils « radio » : la ROM sort de pwr_mgmt_schedule() à chaque événement du contrôleur BLE (annonce,
+        # événement de connexion), sans interruption pour l'application (mesuré sur le boîtier le 17/11/2026,
+        # firmware de sonde « sched »). TWIN_BLE_WAKES : « turbo » (défaut : les réveils dont le tour de boucle
+        # ne fait rien sont sautés, voir RADIO_QUIET), « all » (tous, fidèle aux statistiques de veille du
+        # boîtier, plus lent), « off » (aucun, comportement d'avant le 17/11/2026).
+        self.radio_wakes = os.environ.get('TWIN_BLE_WAKES', 'turbo')
+        self._radio_wake, self.radio_wake_count = False, 0
+        # Turbo : après RADIO_QUIET réveils radio dont le tour de boucle n'a appelé aucun modèle, les suivants
+        # sont sautés jusqu'au prochain réveil par une vraie interruption (le tour aurait été identique).
+        self._rw_pass, self._rw_calls, self._rw_quiet, self.radio_wake_skipped = False, 0, 0, 0
+        self._act_calls = 0                     # appels de modèles hors RADIO_PASS_IGNORE
         # Accélération des boucles d'attente actives : voir _pwr_schedule
         self.turbo = turbo if turbo is not None else os.environ.get('TWIN_TURBO', '1') != '0'   # TWIN_TURBO=0 : exécution brute
         self._model_calls = self._calls_at_sched = 0
@@ -253,7 +273,7 @@ class Twin:
     # ================================================================== temps
     def now(self):
         """Temps virtuel courant (cycles), y compris pendant une tranche."""
-        return self._slice_base + self._slice_extra if self._running else self.cycles
+        return self._slice_base + self._slice_extra + self._slice_jump if self._running else self.cycles
 
     def now_ms(self):
         return self.now() * 1000 // F_CPU
@@ -276,6 +296,15 @@ class Twin:
 
     def schedule_ms(self, delay_ms, fn, *args):
         return self.schedule(ms(delay_ms), fn, *args)
+
+    def radio_wake(self):
+        """Événement du contrôleur BLE : réveille le cœur s'il dort dans pwr_mgmt_schedule(), sans rien
+        signaler à l'application (la boucle refait un tour, puis se rendort)."""
+        if self.radio_wakes != 'off' and self.asleep:
+            if self.radio_wakes == 'turbo' and self.turbo and self._rw_quiet >= RADIO_QUIET:
+                self.radio_wake_skipped += 1
+                return
+            self._radio_wake = True
 
     @staticmethod
     def cancel(ev):
@@ -518,8 +547,11 @@ class Twin:
                 if self._pure_last.get(key, PASS) != ret:
                     self._pure_last[key] = ret
                     self._model_calls += 1
-            elif fn != self._pwr_schedule:
+                    self._act_calls += 1
+            elif fn != self._pwr_schedule and fn != self._pwr_mode_set:
                 self._model_calls += 1
+                if name not in RADIO_PASS_IGNORE:
+                    self._act_calls += 1
             if ret is not PASS:
                 self._return(ret)
 
@@ -528,6 +560,8 @@ class Twin:
         self.rom_calls[name] = self.rom_calls.get(name, 0) + 1
         h = self.rom_handlers.get(name)
         self._model_calls += 1
+        if name not in RADIO_PASS_IGNORE:
+            self._act_calls += 1
         self.cycles_add(COST_CALL)
         if h:
             fn, n = h
@@ -560,7 +594,7 @@ class Twin:
     def _on_periph_read(self, uc, access, addr, size, value, _):
         a = addr & ~3
         if a == self.TIMER_VAL:               # AON TIMER_VAL, multiplexé par AON_PAD_CTL1[31:30]
-            self.cycles_add(COST_CLOCK)
+            self.cycles_add(COST_AON_CLOCK)
             pb = self._periph
             sel = (_U32.unpack_from(pb, self.PAD_CTL1 - PERIPH_BASE)[0] >> 30) & 3
             now = self.now()
@@ -660,7 +694,7 @@ class Twin:
             t = self._next_event()
             target = now + SPIN_SKIP if t is None else min(t, now + SPIN_SKIP)
             if target > now:
-                self._slice_extra += target - now
+                self._slice_jump += target - now
                 self.spin_skipped += target - now
                 self._yield = True
                 self.uc.emu_stop()
@@ -672,6 +706,7 @@ class Twin:
         jusqu'à la livraison suivante à chaque morceau et la boucle ne viderait jamais le tampon (NMEA du GNSS
         avec GSV : ≈ 500 octets/s)."""
         self._model_calls += 1
+        self._act_calls += 1
 
     def _wait_start(self):
         """Entrée d'une fonction d'attente : la durée déjà attendue repart de zéro (deux attentes successives
@@ -684,7 +719,7 @@ class Twin:
         Tant que le firmware relit l'horloge sans appeler aucun modèle (ni E/S, ni radio, ni Flash, ni BLE) et
         sans interruption à servir, il ne fait qu'attendre : après POLL_MIN lectures, chaque lecture fait sauter
         le temps d'au plus 1/POLL_FRAC de la durée déjà attendue (au plus POLL_SKIP), sans dépasser le prochain
-        événement. Une attente se termine donc au plus ≈ 6 % trop tard ; les échéances restent exactes : en
+        événement. Une attente se termine donc au plus ≈ 3 % trop tard ; les échéances restent exactes : en
         atteignant un événement, la tranche s'arrête pour le traiter et injecter ses interruptions."""
         if not self.turbo or self._in_irq or (self._pending and not self._in_call and self._irq_enabled()):
             self._poll_n = 0
@@ -703,13 +738,13 @@ class Twin:
             self._yield = True
             self.uc.emu_stop()
         if jump > 0:
-            self._slice_extra += jump
+            self._slice_jump += jump
             self.poll_skipped += jump
 
     # ================================================================== exécution
     def _exec(self, start, count, until=0):
         """Exécute au plus `count` instructions depuis `start`. Renvoie 'count', 'until', 'sleep' ou lève."""
-        self._slice_base, self._slice_extra = self.cycles, 0
+        self._slice_base, self._slice_extra, self._slice_jump = self.cycles, 0, 0
         self._running = True
         self._yield = False
         res = 'count'
@@ -736,7 +771,10 @@ class Twin:
         finally:
             self._running = False
             done = count if res == 'count' else 0
-            self.cycles = self._slice_base + max(done, self._slice_extra)
+            # Temps de la tranche = coûts des modèles (appels de pilotes, accès AON…) + instructions au coût moyen
+            # CPI, ou les sauts de l'accélérateur s'ils sont plus longs : dans une attente active, les sauts
+            # représentent déjà le temps passé à exécuter la boucle (les additionner le compterait deux fois).
+            self.cycles = self._slice_base + self._slice_extra + max(int(done * CPI), self._slice_jump)
         return res
 
     def _dispatch_due(self):
@@ -765,6 +803,7 @@ class Twin:
         self.pwr_mode = 0
         self._cal = None
         self.asleep = False
+        self._radio_wake, self._rw_pass, self._rw_quiet = False, False, 0
         self._build_cpu()
         for f in self.reset_listeners:
             f()
@@ -815,9 +854,9 @@ class Twin:
                     n = self.rng.randint(SLICE // 2, SLICE)
                 t = self._next_event()
                 if t is not None:
-                    n = max(1, min(n, t - self.cycles))
+                    n = max(1, min(n, int((t - self.cycles) / CPI)))
                 if end is not None:
-                    n = max(1, min(n, end - self.cycles))
+                    n = max(1, min(n, int((end - self.cycles) / CPI)))
                 if budget is not None:
                     if budget <= 0:
                         hot = ', '.join(self.where(a) for a, _ in self.pc_samples.most_common(4))
@@ -845,6 +884,9 @@ class Twin:
                 if r == 'sleep':
                     self.asleep = True
                     self.sleeps += 1
+                    if self._rw_pass:           # fin d'un tour dû à un réveil radio : a-t-il fait quelque chose ?
+                        self._rw_quiet = self._rw_quiet + 1 if self._act_calls == self._rw_calls else 0
+                        self._rw_pass = False
             except Reset as e:
                 if reset == 'raise':
                     raise
@@ -854,7 +896,13 @@ class Twin:
         """Le cœur dort dans pwr_mgmt_schedule : le temps saute d'événement en événement jusqu'à ce qu'une
         interruption soit à servir (réveil) ou jusqu'à `end`. Renvoie True au réveil."""
         while True:
-            if self._pending:
+            if self._pending or self._radio_wake:
+                if self._radio_wake and not self._pending:
+                    self.radio_wake_count += 1
+                    self._rw_pass, self._rw_calls = True, self._act_calls
+                else:
+                    self._rw_pass, self._rw_quiet = False, 0
+                self._radio_wake = False
                 self._wake()
                 return True
             t = self._next_event()
