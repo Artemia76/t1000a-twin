@@ -719,7 +719,7 @@ class Twin:
         Tant que le firmware relit l'horloge sans appeler aucun modèle (ni E/S, ni radio, ni Flash, ni BLE) et
         sans interruption à servir, il ne fait qu'attendre : après POLL_MIN lectures, chaque lecture fait sauter
         le temps d'au plus 1/POLL_FRAC de la durée déjà attendue (au plus POLL_SKIP), sans dépasser le prochain
-        événement. Une attente se termine donc au plus ≈ 6 % trop tard ; les échéances restent exactes : en
+        événement. Une attente se termine donc au plus ≈ 3 % trop tard ; les échéances restent exactes : en
         atteignant un événement, la tranche s'arrête pour le traiter et injecter ses interruptions."""
         if not self.turbo or self._in_irq or (self._pending and not self._in_call and self._irq_enabled()):
             self._poll_n = 0
