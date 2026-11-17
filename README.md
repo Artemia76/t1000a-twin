@@ -98,9 +98,15 @@ jumeau hors du dépôt.
   par des modèles. Un bogue de la ROM, ou une mauvaise configuration qu'elle seule détecterait (horloge LF,
   alimentation, comme pour hello-0.1), n'est **pas** vu. Les réglages de démarrage restent à comparer au
   firmware Seeed.
-* Aucun comportement électrique ni radiofréquence, pas de consommation. 1 instruction ≈ 1 cycle : le code
-  s'exécute ≈ 6 fois plus vite que sur le boîtier (`loop()` du compagnon ≈ 27 µs contre ≈ 170 µs mesurées le
-  17/11/2026 ; sonde « sched cpu » pour en trouver la cause).
+* Aucun comportement électrique ni radiofréquence, pas de consommation.
+* **Temps d'exécution** (calé le 17/11/2026 sur le boîtier, sonde « sched cpu », 64,0 MHz mesurés) : une
+  instruction coûte en moyenne `CPI` = 1,64 cycle (SHA-256 de 1 Ko : 113 000 cycles pour 68 909 instructions ;
+  `TWIN_CPI=1` pour l'ancien modèle) ; une lecture du calendrier AON coûte 57 cycles de plus (`gr551x_ticks32k()`
+  = 101 cycles). Temps d'une tranche = coûts des modèles + max(instructions × CPI, sauts de l'accélérateur).
+  Limites : le temps lu par le firmware (`millis()`, `CYCCNT`) n'avance pas avec les instructions au milieu
+  d'une tranche (paliers ≤ 10 000 instructions) ; une tranche interrompue (veille, événement) ne compte pas
+  ses instructions ; CPU tenu éveillé, la boucle du compagnon tourne encore ≈ 2 fois plus vite que sur le
+  boîtier (11 500 contre 5 000 tours/s : interruptions BLE et pilotes comptés 60 cycles forfaitaires).
 * **Veille légère** : comme la ROM du GR5515, `pwr_mgmt_schedule()` sort de veille à chaque événement du
   contrôleur BLE (annonce : intervalle `adv_intv_max` + 0–10 ms ; connexion : intervalle du téléphone), deux
   fois par événement (début, fin 3 ms après), sans interruption pour l'application. Calé sur le boîtier
@@ -115,7 +121,7 @@ jumeau hors du dépôt.
     au prochain événement (1 ms au plus) ;
   * une attente active (`delay()`, `delayMicroseconds()`, `delay_ms` du SDK, toute boucle sur `millis()`)
     qui relit l'horloge 16 fois sans appeler aucun modèle fait sauter le temps à chaque lecture, d'au plus
-    1/16 de la durée déjà attendue (4 ms au plus). Une attente finit donc au plus ≈ 6 % trop tard ;
+    1/32 de la durée déjà attendue (4 ms au plus). Une attente finit donc au plus ≈ 3 % (un saut) trop tard ;
   * une lecture de broche qui renvoie la même valeur que la précédente ne compte pas comme activité : une
     boucle qui attend le relâchement du bouton reste une attente ;
   * une instruction `b .` saute directement au prochain événement.

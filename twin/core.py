@@ -42,14 +42,21 @@ DFU_FLAG = 0x010E4000
 
 SLICE = 10_000                                  # instructions par tranche (≈ 156 µs)
 COST_CALL = 60                                  # cycles comptés pour un pilote remplacé par un modèle
-COST_CLOCK = 16                                 # cycles comptés par lecture d'horloge
+COST_CLOCK = 16                                 # cycles comptés par lecture d'horloge (DWT->CYCCNT, SysTick)
+# Mesuré sur le boîtier le 17/11/2026 (sonde « sched cpu », IRQ coupées) : gr551x_ticks32k() = 101 cycles pour
+# 27 instructions ; le reste (≈ 57 cycles) est l'accès au compteur du calendrier AON (sélection par
+# AON_PAD_CTL1, lecture de TIMER_VAL, sélection restaurée), domaine basse fréquence.
+COST_AON_CLOCK = 57
+# Cycles par instruction : SHA-256 de 1 Ko = 113 000 cycles sur le boîtier pour 68 909 instructions (1,64) ;
+# une boucle serrée en Flash coûte 1,5 à 2,5 selon son alignement (cache XIP). TWIN_CPI=1 : modèle d'avant.
+CPI = float(os.environ.get('TWIN_CPI', '1.64'))
 COST_IRQ = 120                                  # entrée + sortie d'interruption
 QUIET_LOOPS = 8                                 # tours de boucle « à vide » avant d'accélérer
 RADIO_QUIET = 2                                 # réveils radio « à vide » de suite avant de sauter les suivants
 RADIO_PASS_IGNORE = {'app_aon_wdt_refresh', 'pwr_mgmt_mode_set', 'pwr_mgmt_schedule'}   # à chaque tour : pas une activité
 SPIN_SKIP = 64_000                              # saut maximal par tour accéléré (1 ms)
 POLL_MIN = 16                                   # lectures d'horloge consécutives avant d'accélérer une attente
-POLL_FRAC = 16                                  # saut ≤ durée de l'attente / POLL_FRAC (retard ≤ ≈ 6 %)
+POLL_FRAC = 32                                   # saut ≤ durée de l'attente / POLL_FRAC (retard ≤ ≈ 3 % par saut)
 POLL_SKIP = 256_000                             # saut maximal par lecture d'horloge (4 ms)
 CONSUMERS = ('_ZN10GR551xUart4readEv',)          # GR551xUart::read() (cœur Arduino de platform-gr551x)
 
@@ -122,7 +129,7 @@ class Twin:
         self._heap, self._seq = [], 0
         self._pending = []                      # rappels firmware à injecter : (nom, adr, args, blobs)
         self._in_irq = False
-        self._slice_base, self._slice_extra = 0, 0
+        self._slice_base, self._slice_extra, self._slice_jump = 0, 0, 0
         self.log_list = []                      # (cycles, type, détails)
         self.rom_calls = {}
         self.calls = []                         # fonctions tracées (trace())
@@ -266,7 +273,7 @@ class Twin:
     # ================================================================== temps
     def now(self):
         """Temps virtuel courant (cycles), y compris pendant une tranche."""
-        return self._slice_base + self._slice_extra if self._running else self.cycles
+        return self._slice_base + self._slice_extra + self._slice_jump if self._running else self.cycles
 
     def now_ms(self):
         return self.now() * 1000 // F_CPU
@@ -587,7 +594,7 @@ class Twin:
     def _on_periph_read(self, uc, access, addr, size, value, _):
         a = addr & ~3
         if a == self.TIMER_VAL:               # AON TIMER_VAL, multiplexé par AON_PAD_CTL1[31:30]
-            self.cycles_add(COST_CLOCK)
+            self.cycles_add(COST_AON_CLOCK)
             pb = self._periph
             sel = (_U32.unpack_from(pb, self.PAD_CTL1 - PERIPH_BASE)[0] >> 30) & 3
             now = self.now()
@@ -687,7 +694,7 @@ class Twin:
             t = self._next_event()
             target = now + SPIN_SKIP if t is None else min(t, now + SPIN_SKIP)
             if target > now:
-                self._slice_extra += target - now
+                self._slice_jump += target - now
                 self.spin_skipped += target - now
                 self._yield = True
                 self.uc.emu_stop()
@@ -731,13 +738,13 @@ class Twin:
             self._yield = True
             self.uc.emu_stop()
         if jump > 0:
-            self._slice_extra += jump
+            self._slice_jump += jump
             self.poll_skipped += jump
 
     # ================================================================== exécution
     def _exec(self, start, count, until=0):
         """Exécute au plus `count` instructions depuis `start`. Renvoie 'count', 'until', 'sleep' ou lève."""
-        self._slice_base, self._slice_extra = self.cycles, 0
+        self._slice_base, self._slice_extra, self._slice_jump = self.cycles, 0, 0
         self._running = True
         self._yield = False
         res = 'count'
@@ -764,7 +771,10 @@ class Twin:
         finally:
             self._running = False
             done = count if res == 'count' else 0
-            self.cycles = self._slice_base + max(done, self._slice_extra)
+            # Temps de la tranche = coûts des modèles (appels de pilotes, accès AON…) + instructions au coût moyen
+            # CPI, ou les sauts de l'accélérateur s'ils sont plus longs : dans une attente active, les sauts
+            # représentent déjà le temps passé à exécuter la boucle (les additionner le compterait deux fois).
+            self.cycles = self._slice_base + self._slice_extra + max(int(done * CPI), self._slice_jump)
         return res
 
     def _dispatch_due(self):
@@ -844,9 +854,9 @@ class Twin:
                     n = self.rng.randint(SLICE // 2, SLICE)
                 t = self._next_event()
                 if t is not None:
-                    n = max(1, min(n, t - self.cycles))
+                    n = max(1, min(n, int((t - self.cycles) / CPI)))
                 if end is not None:
-                    n = max(1, min(n, end - self.cycles))
+                    n = max(1, min(n, int((end - self.cycles) / CPI)))
                 if budget is not None:
                     if budget <= 0:
                         hot = ', '.join(self.where(a) for a, _ in self.pc_samples.most_common(4))
