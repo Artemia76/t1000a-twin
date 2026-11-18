@@ -89,10 +89,15 @@ def test_charge_terminee_allumee_fixe(node):
 
 def test_debranchement_retour_au_clignotement(node):
     plug(node)
-    node.run(1500)
-    assert node.pwm.duty.get(LED_PWM) is not None
+    # câble relu au plus une fois par seconde, et sur batterie le CPU dort jusqu'à 1 s entre deux tours :
+    # jusqu'à ≈ 2 s avant la respiration selon la phase (mesuré : 10 à 1280 ms)
+    for _ in range(250):
+        node.run(10)
+        if node.pwm.duty.get(LED_PWM) is not None:
+            break
+    assert node.pwm.duty.get(LED_PWM) is not None, 'respiration de la LED sur le chargeur'
     unplug(node)
-    node.run(1500)
+    node.run(2500)
     s = sample(node, 8000)
     assert all(d is None for d, _ in s), 'PWM de la LED arrêté'
     assert any(led for _, led in s), 'clignotement de vie revenu'
