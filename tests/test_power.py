@@ -69,7 +69,7 @@ def test_journal_toutes_les_10_min(console):
     assert int(idle_pm) > 800
     assert int(conn_s) > 590, 'connexion de la console ouverte tout l\'intervalle'
     assert int(flags, 16) & 0x02, 'flag « BLE connecté » au moment de la lecture'
-    assert int(flags, 16) & 0x20, 'GPIO14 (diviseur de mesure) à l\'état haut'
+    assert not int(flags, 16) & 0x20, 'GPIO14 (diviseur de mesure) coupé hors des lectures de la batterie'
 
 
 def test_chg(console):
