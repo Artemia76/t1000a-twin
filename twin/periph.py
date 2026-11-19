@@ -373,25 +373,44 @@ class Spi:
         return OK
 
 
+# Capteur de température interne (entrée ADC_INPUT_SRC_TMP) : code = T0 + PENTE × 0,00175 × (T − 25 °C), avec les
+# valeurs par défaut du SDK Goodix (exemple adc_temp_vbat), utilisées faute d'étalonnage d'usine (sys_adc_trim_get).
+ADC_SRC_TMP = 5
+TMP_T0, TMP_SLOPE = 4979, 4932
+
+
 class Adc:
-    """app_adc : tensions des broches MSIO fournies par des sources Python (mV)."""
+    """app_adc : tensions des broches MSIO fournies par des sources Python (mV), et température interne du GR5515."""
 
     def __init__(self, tw):
         self.tw = tw
         self.sources = {}                   # n° MSIO -> fn() -> mV
         self.channel = None
+        self.die_temp_c = 22.0              # température de la puce (°C)
         tw.on('app_adc_init', self._init)
         tw.on('app_adc_deinit', lambda: OK)
         tw.on('app_adc_conversion_sync', self._conv)
         tw.on('app_adc_voltage_intern', self._volts)
+        tw.on('sys_adc_trim_get', lambda p_trim: 1)      # pas d'étalonnage d'usine dans le jumeau
 
     def _init(self, p_params, cb):
         L = self.tw.L
-        mask = L.get(self.tw.read(p_params, 16), 'app_adc_params_t', 'pin_cfg.channel_p.pin')
+        size = L.field('app_adc_params_t', 'init.channel_n')[0] + 4
+        data = self.tw.read(p_params, max(16, size))
+        if L.get(data, 'app_adc_params_t', 'init.channel_n') == ADC_SRC_TMP:
+            self.channel = 'tmp'
+            return OK
+        mask = L.get(data, 'app_adc_params_t', 'pin_cfg.channel_p.pin')
         self.channel = (mask & -mask).bit_length() - 1
         return OK
 
     def _conv(self, p_data, length, timeout):
+        if self.channel == 'tmp':
+            code = int(round(TMP_T0 + TMP_SLOPE * 0.00175 * (self.die_temp_c - 25.0)))
+            self.tw.write(p_data, struct.pack(f'<{length}H', *([code] * length)))
+            self.tw.cycles_add(length * 64)
+            self.tw.log('adc', source='tmp', temp_c=self.die_temp_c)
+            return OK
         f = self.sources.get(self.channel)
         mv = f() if f else 0
         code = max(0, min(0xFFFF, int(round(mv * 4))))       # code fictif = 0,25 mV
