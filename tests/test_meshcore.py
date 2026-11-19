@@ -102,9 +102,8 @@ class TestNoeudSeul:
         r = [d for d in comp.battery() if d['code'] == 12]
         assert r and abs(r[0]['battery_mv'] - 3712) <= 20
 
-    @pytest.mark.xfail(reason='point ouvert : GPIO14 (pont batterie, peut-être alimentation RF) reste à 1 en '
-                              'permanence ; à ne couper que pendant la mesure une fois son rôle confirmé', strict=True)
     def test_pont_batterie_coupe_hors_mesure(self, node, comp):
+        # GPIO14 n'active que le pont de mesure (firmware Seeed : mis à 1 seulement autour des lectures ADC)
         comp.battery()
         node.run(100)
         assert node.gpio.level(14) == 0
