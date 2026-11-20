@@ -12,6 +12,7 @@ Câblage modélisé (variants/t1000-a/pins_arduino.h) :
   buzzer PWM0 (EN GPIO15)
 """
 from .core import Twin
+from .qma6100p import Qma6100p
 from .periph import Gpio, Timers, Uart, Spi, Adc, Pwm, Watchdog
 from .lr1110 import LR1110
 from .ag3335 import AG3335
@@ -73,6 +74,7 @@ class T1000A:
         self.adc.sources[2] = lambda: (self.sensor_rail_mv * NTC_SERIES / (NTC_SERIES + ntc_ohm(self.ambient_c))
                                        if on() else 0.0)
         self.adc.sources[3] = lambda: self.light_mv if on() else 0.0
+        self.accel = Qma6100p(self.gpio)       # accéléromètre (I²C logiciel, GPIO7/8/9)
         self.gpio.drive(BUTTON, 0)
         # Arrêt véritable : sources de réveil configurées par le firmware, puis veille ultra-profonde
         self.wake_ext = {}                  # n° AON -> niveau qui réveille (hal_pwr_config_ext_wakeup)
