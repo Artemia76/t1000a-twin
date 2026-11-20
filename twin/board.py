@@ -21,6 +21,29 @@ BUTTON, LED, BAT_EN, BUZZER_EN = 0x20, 0x23, 14, 15
 GPS_EN, GPS_VRTC_EN = 28, 27
 
 
+# CTN du T1000-A (table du firmware Seeed, identique au T1000-E) : résistance (Ω) de -30 à 105 °C par pas de 1 °C
+NTC_SERIES = 8250.0
+NTC_RES = [
+    113347, 107565, 102116, 96978, 92132, 87559, 83242, 79166, 75316, 71677, 68237, 64991, 61919, 59011,
+    56258, 53650, 51178, 48835, 46613, 44506, 42506, 40600, 38791, 37073, 35442, 33892, 32420, 31020,
+    29689, 28423, 27219, 26076, 24988, 23951, 22963, 22021, 21123, 20267, 19450, 18670, 17926, 17214,
+    16534, 15886, 15266, 14674, 14108, 13566, 13049, 12554, 12081, 11628, 11195, 10780, 10382, 10000,
+    9634, 9284, 8947, 8624, 8315, 8018, 7734, 7461, 7199, 6948, 6707, 6475, 6253, 6039,
+    5834, 5636, 5445, 5262, 5086, 4917, 4754, 4597, 4446, 4301, 4161, 4026, 3896, 3771,
+    3651, 3535, 3423, 3315, 3211, 3111, 3014, 2922, 2834, 2748, 2666, 2586, 2509, 2435,
+    2364, 2294, 2228, 2163, 2100, 2040, 1981, 1925, 1870, 1817, 1766, 1716, 1669, 1622,
+    1578, 1535, 1493, 1452, 1413, 1375, 1338, 1303, 1268, 1234, 1202, 1170, 1139, 1110,
+    1081, 1053, 1026, 999, 974, 949, 925, 902, 880, 858,
+]
+
+
+def ntc_ohm(temp_c):
+    """Résistance de la CTN à temp_c (interpolation linéaire dans la table, bornée)."""
+    x = min(max(temp_c + 30.0, 0.0), len(NTC_RES) - 1.0)
+    i = min(int(x), len(NTC_RES) - 2)
+    return NTC_RES[i] + (NTC_RES[i + 1] - NTC_RES[i]) * (x - i)
+
+
 class T1000A:
     def __init__(self, elf, name='t1000a', flash=None, seed=0, trace=False, passkey=123456, battery_mv=3900,
                  radio=True, turbo=None):
@@ -40,6 +63,16 @@ class T1000A:
         self.phone = Phone(self.ble, passkey=passkey)
         self.battery_mv = battery_mv
         self.adc.sources[4] = lambda: self.battery_mv / 2 if self.gpio.level(BAT_EN) else 0.0
+        # Capteurs analogiques alimentés par GPIO14 (comme le pont de la batterie) : rail / 2 sur MSIO1,
+        # CTN (8,25 kΩ vers la masse, CTN vers le rail) sur MSIO2, cellule photo sur MSIO3
+        self.sensor_rail_mv = 3300
+        self.ambient_c = 20.0
+        self.light_mv = 1000.0
+        on = lambda: self.gpio.level(BAT_EN)
+        self.adc.sources[1] = lambda: self.sensor_rail_mv / 2 if on() else 0.0
+        self.adc.sources[2] = lambda: (self.sensor_rail_mv * NTC_SERIES / (NTC_SERIES + ntc_ohm(self.ambient_c))
+                                       if on() else 0.0)
+        self.adc.sources[3] = lambda: self.light_mv if on() else 0.0
         self.gpio.drive(BUTTON, 0)
         # Arrêt véritable : sources de réveil configurées par le firmware, puis veille ultra-profonde
         self.wake_ext = {}                  # n° AON -> niveau qui réveille (hal_pwr_config_ext_wakeup)
