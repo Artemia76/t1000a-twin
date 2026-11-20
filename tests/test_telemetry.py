@@ -3,6 +3,7 @@
 - tension de la batterie (canal 1) et son pourcentage (courbe Li-ion, canal 1) ;
 - température de la puce GR5515 (capteur interne de l'ADC, canal 1) ;
 - chargeur (canal 2) : câble branché (entrée numérique), charge en cours (interrupteur) ;
+- environnement (canal 3) : température ambiante (CTN), lumière (cellule photo, 0..100 %), accélération ;
 - position GNSS (canal 1) quand elle est connue.
 """
 import struct
@@ -15,6 +16,8 @@ CMD_SEND_TELEMETRY_REQ, PUSH_CODE_TELEMETRY_RESPONSE = 39, 0x8B
 # type LPP -> (taille, décodeur)
 LPP = {
     0: (1, lambda b: b[0]),                                        # entrée numérique
+    101: (2, lambda b: struct.unpack('>H', b)[0]),                 # luminosité (ici 0..100 %)
+    113: (6, lambda b: tuple(v / 1000 for v in struct.unpack('>hhh', b))),  # accéléromètre, 0,001 g
     103: (2, lambda b: struct.unpack('>h', b)[0] / 10),            # température, 0,1 °C
     116: (2, lambda b: struct.unpack('>H', b)[0] / 100),           # tension, 0,01 V
     120: (1, lambda b: b[0]),                                      # pourcentage
@@ -82,3 +85,29 @@ def test_chargeur(node):
     t = telemetry(node)
     assert (t[(2, 0)], t[(2, 142)]) == (1, 0), t
     unplug(node)
+
+
+def test_environnement_temperature_et_lumiere(node):
+    """Canal 3 : CTN (MSIO2, rail des capteurs sur MSIO1 ÷ 2) et cellule photo (MSIO3, 0..100 % comme Seeed)."""
+    node.ambient_c, node.light_mv = 23.5, 1280.0             # (1280 - 80) × 100 / 2400 = 50 %
+    t = telemetry(node)
+    assert abs(t[(3, 103)] - 23.5) <= 0.2, t
+    assert t[(3, 101)] == 50, t
+    node.ambient_c, node.light_mv = -12.0, 50.0
+    t = telemetry(node)
+    assert abs(t[(3, 103)] + 12.0) <= 0.2 and t[(3, 101)] == 0, t
+    node.sensor_rail_mv = 3000                               # la conversion suit le rail mesuré
+    node.ambient_c, node.light_mv = 41.0, 3000.0
+    t = telemetry(node)
+    assert abs(t[(3, 103)] - 41.0) <= 0.2 and t[(3, 101)] == 100, t
+    node.sensor_rail_mv = 3300
+    assert not node.gpio.level(14), 'GPIO14 recoupé après la lecture des capteurs'
+
+
+def test_accelerometre(node):
+    """Canal 3 : accélération (QMA6100P, I²C logiciel), puce alimentée seulement pendant la lecture."""
+    node.accel.accel_g = (0.25, -0.5, 0.80)
+    t = telemetry(node)
+    assert all(abs(a - b) <= 0.002 for a, b in zip(t[(3, 113)], (0.25, -0.5, 0.80))), t
+    assert node.gpio.level(7) == 0 and node.gpio.level(8) == 0 and node.gpio.level(9) == 0, 'accéléromètre coupé'
+    assert ('write', 0x0F, 0x04) in node.accel.transactions, 'plage ±8 g de Seeed'

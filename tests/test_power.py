@@ -97,3 +97,14 @@ def test_temps_d_emission_lora(meshcore_debug_elf):
     tx_ms = int(re.search(r'lora: tx (\d+) ms', r).group(1))
     assert toa_ms <= tx_ms < toa_ms + 100, f'temps d\'émission compté {tx_ms} ms, temps d\'antenne {toa_ms:.0f} ms'
     assert 'pkts rx 0 tx 1' in r
+
+
+def test_env(console):
+    """Commande « env » : valeurs converties et tensions brutes ; le circuit de mesure est recoupé ensuite."""
+    console.node.ambient_c, console.node.light_mv = 25.0, 680.0
+    r = console.send('env')
+    m = re.search(r'env: temp (-?\d+\.\d) C  light (\d+) %  \(rail (\d+) mV, ntc (\d+) mV, light (\d+) mV\)', r)
+    assert m, r
+    assert abs(float(m.group(1)) - 25.0) <= 0.2 and int(m.group(2)) == 25, r
+    assert abs(int(m.group(3)) - 3300) <= 2 and abs(int(m.group(5)) - 680) <= 1, r
+    assert not console.node.gpio.level(14)
