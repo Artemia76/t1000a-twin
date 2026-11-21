@@ -426,14 +426,21 @@ class Adc:
 
 
 class Pwm:
-    """app_pwm : on journalise la fréquence produite (buzzer) et le rapport cyclique (LED, analogWrite)."""
+    """app_pwm : on journalise la fréquence produite (buzzer) et le rapport cyclique (LED, analogWrite).
+
+    Horloge commune : PWM0 et PWM1 n'ont qu'une horloge (MCU_SUB_CG, PWM_HCLK, bit 3 de CG_CTRL0 « coupée en WFI »
+    et de CG_CTRL1 « coupée de force »). Comme le HAL réel, app_pwm_deinit() la coupe et app_pwm_init() la rouvre ;
+    tant qu'elle est coupée de force, aucun module ne produit rien (duty vide), même si ses registres restent réglés
+    (vu sur T1000-A : la fin d'un son du buzzer figeait la LED de charge)."""
+
+    CG_WFI, CG_FORCE, PWM_HCLK = 0xA000E2A0, 0xA000E2A4, 1 << 3
 
     def __init__(self, tw):
         self.tw = tw
         self.params = {}                    # id -> fréquence configurée
         self.running = {}
         self.cfg_duty = {}                  # id -> rapport cyclique configuré (%) de la voie active
-        self.duty = {}                      # id -> rapport cyclique produit (%), module démarré seulement
+        self._duty = {}                     # id -> rapport cyclique produit (%), module démarré seulement
         tw.on('app_pwm_init', self._init)
         tw.on('app_pwm_deinit', self._deinit)
         tw.on('app_pwm_start', self._start)
@@ -442,7 +449,18 @@ class Pwm:
         tw.on('app_pwm_config_channel', self._config)
         tw.on('gr551x_pwm_set_level', self._level)      # analogWrite() : comparateur écrit directement
 
+    def _clock(self, on):
+        for reg in (self.CG_WFI, self.CG_FORCE):
+            v = self.tw.r32(reg)
+            self.tw.w32(reg, (v & ~self.PWM_HCLK) if on else (v | self.PWM_HCLK))
+
+    @property
+    def duty(self):
+        """Rapport cyclique réellement produit, par module : rien si l'horloge PWM est coupée de force."""
+        return {} if self.tw.r32(self.CG_FORCE) & self.PWM_HCLK else self._duty
+
     def _init(self, p):
+        self._clock(True)
         L = self.tw.L
         d = self.tw.read(p, L.size('app_pwm_params_t'))
         pid = L.get(d, 'app_pwm_params_t', 'id')
@@ -456,17 +474,18 @@ class Pwm:
 
     def _deinit(self, pid):
         self.running.pop(pid, None)
-        self.duty.pop(pid, None)
+        self._duty.pop(pid, None)
+        self._clock(False)                  # HAL réel : horloge commune coupée, même si l'autre module tourne
         return OK
 
     def _start(self, pid):
         self.running[pid] = self.params.get(pid, 0)
-        self.duty[pid] = self.cfg_duty.get(pid, 0)
-        self.tw.log('pwm', id=pid, freq=self.running[pid], duty=self.duty[pid])
+        self._duty[pid] = self.cfg_duty.get(pid, 0)
+        self.tw.log('pwm', id=pid, freq=self.running[pid], duty=self._duty[pid])
         return OK
 
     def _stop(self, pid):
-        self.duty.pop(pid, None)
+        self._duty.pop(pid, None)
         if self.running.pop(pid, None) is not None:
             self.tw.log('pwm', id=pid, freq=0)
         return OK
@@ -481,14 +500,14 @@ class Pwm:
     def _level(self, pid, channel, level):
         self.cfg_duty[pid] = round((level & 0xFF) * 100 / 255)
         if pid in self.running:
-            self.duty[pid] = self.cfg_duty[pid]
+            self._duty[pid] = self.cfg_duty[pid]
         return None
 
     def _config(self, pid, channel, p_cfg):
         duty = self.tw.read(p_cfg, 1)[0]            # app_pwm_channel_init_t : duty (uint8_t) en tête
         self.cfg_duty[pid] = duty
         if pid in self.running:
-            self.duty[pid] = duty
+            self._duty[pid] = duty
         return OK
 
 

@@ -126,6 +126,28 @@ def test_buzzer_pendant_la_respiration(node):
     assert 'beep 2000 Hz' in con.send('beep', wait_ms=100)    # son de 500 ms : vérifié pendant qu'il sonne
     assert node.pwm.running.get(BUZZER_PWM) == 2000, 'le buzzer (PWM0) sonne'
     assert node.pwm.duty.get(LED_PWM) is not None, 'la LED (PWM1) continue de respirer'
+    node.run(1500)                                            # son terminé : PWM0 libéré (horloge commune)
+    assert node.pwm.running.get(BUZZER_PWM) is None, 'le buzzer s\'est tu'
+    duties = []
+    for _ in range(50):
+        node.run(20)
+        duties.append(node.pwm.duty.get(LED_PWM))
+    assert all(d is not None for d in duties) and len(set(duties)) > 5, \
+        'la LED respire encore après le son (horloge PWM partagée rétablie)'
+
+
+def test_cable_branche_au_demarrage(meshcore_debug_elf):
+    # vu sur T1000-A : branché pendant le redémarrage, la LED restait noire ; la fin de la mélodie de démarrage
+    # (PWM0) coupait l'horloge PWM commune, la LED (PWM1) figée jusqu'au rebranchement
+    n = T1000A(meshcore_debug_elf, flash=preset(guard=MAGIC + b'\x00'))
+    n.adc.sources[CABLE] = lambda: 2490
+    n.gpio.drive(CHG_STAT, 0)
+    n.run(12000)                                              # démarrage et mélodie terminés
+    duties = []
+    for _ in range(100):
+        n.run(20)
+        duties.append(n.pwm.duty.get(LED_PWM))
+    assert all(d is not None for d in duties) and len(set(duties)) > 5, 'respiration dès le démarrage'
 
 
 def test_message_non_lu_extinction_longue(meshcore_debug_elf):
