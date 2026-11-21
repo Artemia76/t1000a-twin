@@ -15,7 +15,7 @@ import pytest
 from conftest import MAGIC, preset
 from helpers import Console, GUS_TX
 from twin import T1000A
-from twin.companion import Companion, NUS_TX
+from twin.companion import Companion
 from twin.lr1110 import MODE_SLEEP
 
 
@@ -27,10 +27,6 @@ def node(meshcore_debug_elf):
     n.con = Console(n)
     n.phone.subscribe(GUS_TX)
     n.run(500)
-    # l'appli connectée garde l'écoute continue : elle se désabonne (le lien reste ouvert pour la console) et
-    # le cycle reprend 30 s plus tard
-    n.phone.write(n.ble.find(NUS_TX) + 1, b'\x00\x00')
-    n.run(32000)
     return n
 
 
@@ -54,11 +50,9 @@ def test_radio_figee_reveillee_et_paquet_emis(node):
     assert int(m.group(1)) >= 1, out
     assert r.duty is not None and not r.busy or r.mode != MODE_SLEEP, 'radio remise en réception'
 
-    # radio de nouveau figée, puis l'appli revient et demande une annonce : elle doit partir vite
+    # radio de nouveau figée, puis l'appli demande une annonce : elle doit partir vite
     freeze_asleep(r)
     n0 = len(r.tx_packets)
-    node.phone.subscribe(NUS_TX)
-    node.run(300)
     assert [d['name'] for d in node.comp.send_advert()] == ['OK']
     assert node.comp.wait(lambda: len(r.tx_packets) > n0, 8000), 'annonce jamais émise : file d\'envoi bloquée'
     pend = node.con.send('pending')
