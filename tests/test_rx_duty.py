@@ -5,7 +5,9 @@
   de 16 symboles (MeshCore ≤ 1.15) est perdue : limite acceptée, documentée ici ;
 - aucun accès SPI pendant le sommeil de la radio (il la réveillerait et casserait le cycle) : le bruit de fond est
   mesuré par de courtes salves en écoute continue, au démarrage puis toutes les 10 min ;
-- console « rxduty [on|off] », réglage enregistré en Flash.
+- console « rxduty [on|off] », réglage enregistré en Flash ;
+- appli compagnon connectée (Mesh Mapper, messagerie) : écoute continue, pour ne pas perdre les réponses des
+  répéteurs ≤ 1.15 ; le cycle reprend 30 s après la déconnexion (la console GUS seule ne compte pas).
 """
 import random
 import re
@@ -132,4 +134,24 @@ def test_deux_noeuds_advert_message_et_accuse(meshcore_elf):
         assert 'PUSH_SEND_CONFIRMED' in [decode(f)['name'] for f in c_src.inbox[n:]], f'accusé {src} → {dst}'
         assert [m.get('text') for m in c_dst.sync_messages()] == [text]
     for x in (a, b):
-        assert x.radio.violations == [] and x.radio.duty is not None
+        assert x.radio.violations == [] and x.radio.duty is None, 'appli connectée : écoute continue'
+
+
+def test_appli_connectee_ecoute_continue(meshcore_elf):
+    n = T1000A(meshcore_elf, flash=preset(guard=MAGIC + b'\x00'))
+    n.run(15000)
+    r = n.radio
+    assert r.duty is not None, 'cycle au repos (aucune appli connectée)'
+    Companion(n).start()
+    n.run(500)
+    assert r.duty is None, 'appli connectée : écoute continue'
+    got, missed = inject(n, 16, seed=3)
+    assert (got, missed) == (40, 0), f'préambule 16 : {got} captées, {missed} manquées'
+    n.phone.disconnect()
+    n.run(20000)
+    assert r.duty is None, 'le cycle ne reprend que 30 s après la déconnexion'
+    n.run(12000)
+    assert r.duty is not None, 'cycle repris après le départ de l\'appli'
+    got, missed = inject(n, 32, seed=4)
+    assert (got, missed) == (40, 0)
+    assert r.violations == []
