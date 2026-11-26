@@ -1,6 +1,6 @@
 """Télémétrie du compagnon (CayenneLPP, requête « self », commande 39) : ce que publie le T1000-A.
 
-- tension de la batterie (canal 1) et son pourcentage (courbe Li-ion, canal 1) ;
+- tension de la batterie (canal 1) et son pourcentage (courbe du firmware Seeed, canal 1) ;
 - température de la puce GR5515 (capteur interne de l'ADC, canal 1) ;
 - chargeur (canal 2) : câble branché (entrée numérique), charge en cours (interrupteur) ;
 - environnement (canal 3) : température ambiante (CTN), lumière (cellule photo, 0..100 %), accélération ;
@@ -54,7 +54,7 @@ def telemetry(node):
 
 def test_batterie_tension_et_pourcentage(node):
     unplug(node)
-    node.battery_mv = 3800                      # 60 % sur la courbe à vide (50 % = 3720 mV)
+    node.battery_mv = 3800                      # 60 % sur la courbe Seeed (3795 mV = 60 %, 3840 mV = 68 %)
     node.run(1500)
     t = telemetry(node)
     assert abs(t[(1, 116)] - 3.80) <= 0.02, t
