@@ -101,3 +101,49 @@ def test_charge_a_l_arret(meshcore_elf):
     n.press(2600)
     n.run(8000)
     assert not n.is_off() and n.ble.adv_on, 'appui de 2 s pendant la charge : MeshCore démarre'
+
+
+# ---------------------------------------------------------------------- batterie faible
+# Protection de la batterie : une lecture par minute, coupure après 3 lectures de suite sous 3300 mV (sur batterie
+# seulement) ; rallumage par le bouton refusé sous 3400 mV, la charge réveillant le boîtier comme après tout arrêt.
+
+def started(elf):
+    n = T1000A(elf, flash=preset(guard=MAGIC + b'\x00'))
+    unplug(n)
+    n.run(10000)
+    return n
+
+
+def test_coupure_batterie_faible(meshcore_elf):
+    n = started(meshcore_elf)
+    n.battery_mv = 3250
+    n.run(150_000)
+    assert not n.is_off(), 'pas avant la 3e lecture basse de suite'
+    n.run(70_000)
+    assert n.is_off(), 'coupure après 3 lectures sous 3300 mV'
+    assert n.off_pins == {'gps_en': 0, 'vrtc_en': 0, 'bat_en': 0, 'buzzer_en': 0, 'led': 0, 'lora_sleep': True}
+    assert n.wake_ext == {0: 1, 4: 0}
+    assert n.tw.flash_bytes(OFF_REC, 6) == b'OFF1' + (3250).to_bytes(2, 'little')
+    # rallumage refusé tant que la batterie reste sous 3400 mV, même avec un appui long
+    n.battery_mv = 3350
+    n.press(2600)
+    n.run(8000)
+    assert n.is_off() and not n.ble.adv_on, 'batterie trop faible : le boîtier reste éteint'
+    n.battery_mv = 3450
+    n.press(2600)
+    n.run(8000)
+    assert not n.is_off() and n.ble.adv_on, 'batterie remontée : rallumage normal'
+
+
+def test_pas_de_coupure_sur_creux_ou_sur_cable(meshcore_elf):
+    n = started(meshcore_elf)
+    n.battery_mv = 3250
+    n.run(130_000)                   # 2 lectures basses
+    n.battery_mv = 3600              # creux passager (émission LoRa)
+    n.run(70_000)
+    n.battery_mv = 3250
+    n.run(130_000)                   # le compte repart de zéro : 2 lectures basses seulement
+    assert not n.is_off()
+    plug(n)                          # sur le chargeur : jamais de coupure
+    n.run(250_000)
+    assert not n.is_off()
